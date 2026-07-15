@@ -9,13 +9,16 @@ Verify any entry independently:
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir ledger/<run-dir>/
 ```
 
-Runs recorded: 2 · receipts: 11 (MEASURED from files present; cron is best-effort, gaps are honest)
+Runs recorded: 3 · receipts: 20 (MEASURED from files present; cron is best-effort, gaps are honest)
 
-Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=8 — a past frequency, NOT a prediction
+Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=12 — a past frequency, NOT a prediction
+
+Hash chain: 1 link(s), head seq 1 sha256 85b2cc4081f1… — every sealed run tamper-evident; walk it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/`
 
 | run (UTC) | receipts |
 |---|---|
 | 20260715T090057Z_run1 | 5 |
 | 20260715T092114Z_run2 | 6 |
+| 20260715T094346Z_run3 | 9 |
 
 _Advisory research output. NOT financial advice. No execution, no custody._
