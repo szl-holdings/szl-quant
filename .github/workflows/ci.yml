@@ -1,0 +1,24 @@
+# CI for szl-quant — unit tests + receipt verification.
+# All actions pinned to full-length commit SHAs (org convention).
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Unit tests (doctrine invariants, DSSE, gates, determinism)
+        run: node --test test/engine.test.mjs
+      - name: Verify committed receipts against pinned engine pubkey
+        run: |
+          if ls receipts/*.json >/dev/null 2>&1; then
+            node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
+          else
+            echo "no receipts committed yet — nothing to verify (honest empty)"
+          fi
