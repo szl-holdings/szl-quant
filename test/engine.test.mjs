@@ -204,3 +204,77 @@ test('resilient history: unmapped asset with primary down → honest UNAVAILABLE
   assert.match(r.unavailable.note, /no Coinbase product mapping/);
   assert.equal(COINBASE_PRODUCTS['some-unmapped-coin'], undefined);
 });
+
+// ── verifiable track record ─────────────────────────────────────────────────
+import { scoreSignal, buildTrackRecord, verifySignalEnvelopes, signalTimeMs, HORIZONS_DAYS } from '../src/track.mjs';
+import { verifyEnvelope as dsseVerifyEnvelope } from '../src/dsse.mjs';
+
+const T0 = Date.parse('2026-01-01T00:00:00.000Z');
+const DAY = 86400000;
+const sigStatement = (iso, decision) => ({ subject: [{ name: `szl-quant/signal/T/${iso}`, digest: { sha256: 'x' } }], predicate: { decision } });
+
+test('track: signalTimeMs parses decision clock from subject name', () => {
+  const st = sigStatement('2026-01-01T00:00:00.000Z', {});
+  assert.equal(signalTimeMs(st), T0);
+  assert.equal(signalTimeMs({ subject: [{ name: 'szl-quant/signal/T/garbage' }] }), null);
+});
+
+test('track: realized horizons are MEASURED from one source series', () => {
+  const series = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => ({ tMs: T0 + i * DAY, close: [100, 110, 105, 103, 102, 101, 99, 90, 95][i] }));
+  const { outcomes } = scoreSignal({ statement: sigStatement('2026-01-01T00:00:00.000Z', {}), series, source: 'test-src', nowMs: T0 + 30 * DAY, horizons: HORIZONS_DAYS });
+  assert.equal(outcomes.h1d.label, 'MEASURED');
+  assert.ok(Math.abs(outcomes.h1d.forwardReturn - 0.10) < 1e-12);           // 100 → 110
+  assert.equal(outcomes.h1d.source, 'test-src');
+  assert.equal(outcomes.h7d.label, 'MEASURED');
+  assert.ok(Math.abs(outcomes.h7d.forwardReturn - (-0.10)) < 1e-12);        // 100 → 90
+});
+
+test('track: unelapsed horizon is honest UNAVAILABLE pending, never a guess', () => {
+  const series = [{ tMs: T0, close: 100 }];
+  const { outcomes } = scoreSignal({ statement: sigStatement('2026-01-01T00:00:00.000Z', {}), series, nowMs: T0 + DAY + 3600000, horizons: [7] });
+  assert.equal(outcomes.h7d.label, 'UNAVAILABLE');
+  assert.match(outcomes.h7d.note, /pending/);
+  assert.ok(outcomes.h7d.pendingUntilIso);
+});
+
+test('track: elapsed horizon with missing closes is an honest gap, not silence', () => {
+  const series = [{ tMs: T0, close: 100 }, { tMs: T0 + DAY, close: 101 }];
+  const { outcomes } = scoreSignal({ statement: sigStatement('2026-01-01T00:00:00.000Z', {}), series, nowMs: T0 + 40 * DAY, horizons: [7] });
+  assert.equal(outcomes.h7d.label, 'UNAVAILABLE');
+  assert.match(outcomes.h7d.note, /history gap/);
+});
+
+test('track: tampered receipts are EXCLUDED by name — only verified enter the record', () => {
+  const { privateKey, publicKey } = generateEngineKeypair();
+  const mk = (name) => signReceipt({ predicateType: PREDICATE.signal, subjectName: name, subjectBody: { v: name }, predicate: { decision: { v: name } }, privateKey, publicKey }).envelope;
+  const good = mk('szl-quant/signal/A/2026-01-01T00:00:00.000Z');
+  const bad = mk('szl-quant/signal/B/2026-01-01T00:00:00.000Z');
+  bad.payload = Buffer.from(Buffer.from(bad.payload, 'base64').toString().replace(/signal\/B/g, 'signal/Z')).toString('base64');
+  const { verified, excluded } = verifySignalEnvelopes([{ file: 'a.json', envelope: good }, { file: 'b.json', envelope: bad }, { file: 'c.json', envelope: null }], publicKey, { verifyEnvelope: dsseVerifyEnvelope });
+  assert.equal(verified.length, 1);
+  assert.equal(excluded.length, 2);
+  assert.deepEqual(excluded.map((x) => x.file).sort(), ['b.json', 'c.json']);
+});
+
+test('track: full population — BLOCKED counted as no-calls, ALLOWED scored, weak-evidence note in-band', () => {
+  const addr = 'AsseT111';
+  const allowed = { file: 's1', statement: sigStatement('2026-01-01T00:00:00.000Z', { asset: { symbol: 'T', address: addr }, verdict: 'ALLOWED', proposedAction: 'ENTER_LONG', conviction: 0.5, snapshot: { priceUsd: 1 } }) };
+  const blockedSig = { file: 's2', statement: sigStatement('2026-01-01T00:00:00.000Z', { asset: { symbol: 'U', address: 'other' }, verdict: 'BLOCKED', proposedAction: 'ABSTAIN', blockedBy: ['conviction', 'volatility'] }) };
+  const histories = { [addr]: { ok: true, series: [{ tMs: T0, close: 100 }, { tMs: T0 + DAY, close: 130 }], dataset: { source: 'test', sha256: 'abc' } } };
+  const rep = buildTrackRecord({ verified: [allowed, blockedSig], excluded: [], histories, nowMs: T0 + 3 * DAY, horizons: [1] });
+  assert.equal(rep.population.total, 2);
+  assert.equal(rep.population.scored, 1);
+  assert.equal(rep.population.blocked, 1);
+  assert.deepEqual(rep.population.noCallsByGate, [{ gate: 'conviction', count: 1 }, { gate: 'volatility', count: 1 }]);
+  const a = rep.aggregates.h1d;
+  assert.equal(a.nRealized, 1);
+  assert.equal(a.wins, 1);
+  assert.equal(a.hitRate, 1);
+  assert.match(a.note, /weak evidence/);
+  const row = rep.signals.find((r) => r.file === 's1');
+  assert.equal(row.seriesSha256, 'abc');
+  assert.equal(row.outcomes.h1d.label, 'MEASURED');
+  const nc = rep.signals.find((r) => r.file === 's2');
+  assert.equal(nc.scored, false);
+  assert.match(nc.note, /no-call/);
+});

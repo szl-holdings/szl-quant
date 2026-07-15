@@ -21,6 +21,7 @@ export const PREDICATE = Object.freeze({
   signal: 'https://szl.holdings/quant/signal/v1',
   backtest: 'https://szl.holdings/quant/backtest/v1',
   session: 'https://szl.holdings/quant/session/v1',
+  track: 'https://szl.holdings/quant/track-record/v1',
 });
 
 function sha256Hex(obj) {

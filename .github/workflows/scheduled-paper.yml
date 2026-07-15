@@ -50,9 +50,10 @@ jobs:
           node bin/quant.mjs paper --out "$RUNNER_TEMP/receipts"
       - name: Independently verify fresh receipts against pinned pubkey
         run: node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir "$RUNNER_TEMP/receipts"
-      - name: Append receipts to ledger branch
+      - name: Append receipts to ledger branch (+ regenerate signed track record)
         env:
           GH_TOKEN: ${{ github.token }}
+          SZL_QUANT_KEY: ${{ runner.temp }}/engine_key.pem
         run: |
           set -euo pipefail
           STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -70,6 +71,11 @@ jobs:
           fi
           mkdir -p "$DEST"
           cp "$RUNNER_TEMP"/receipts/*.json "$DEST"/
+          # Score the FULL ledger (verified receipts only) → signed track-record
+          # receipt lands in this run's dir; then independently re-verify the
+          # whole new dir (session + signals + track record) against the pin.
+          node "$GITHUB_WORKSPACE/bin/quant.mjs" track --ledger ledger --out "$DEST" --histdays 60
+          node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --dir "$DEST"
           # Regenerate INDEX.md — counts MEASURED from the files actually present.
           node -e '
             const fs = require("node:fs");
@@ -80,6 +86,20 @@ jobs:
               total += files.length;
               return `| ${d} | ${files.length} |`;
             });
+            // Latest signed track record → honest headline (fail-soft if none).
+            let track = null;
+            const trs = [];
+            for (const d of dirs) for (const f of fs.readdirSync("ledger/"+d)) if (f.startsWith("trackrecord_") && f.endsWith(".json")) trs.push("ledger/"+d+"/"+f);
+            trs.sort();
+            if (trs.length) {
+              try {
+                const env = JSON.parse(fs.readFileSync(trs[trs.length-1], "utf8"));
+                track = JSON.parse(Buffer.from(env.payload, "base64").toString()).predicate.summary;
+              } catch {}
+            }
+            const trackLine = track
+              ? `Track record (latest, MEASURED from verified receipts only): ${Object.entries(track.aggregates).map(([k,a]) => `+${k.slice(1,-1)}d n=${a.nRealized} hit=${a.hitRate===null?"—":Math.round(a.hitRate*100)+"%"} pending=${a.nPending}`).join(" · ")} · no-calls(BLOCKED)=${track.population.blocked} — a past frequency, NOT a prediction`
+              : "Track record: no track-record receipt yet.";
             const md = [
               "# szl-quant receipt ledger",
               "",
@@ -93,6 +113,8 @@ jobs:
               "```",
               "",
               `Runs recorded: ${dirs.length} · receipts: ${total} (MEASURED from files present; cron is best-effort, gaps are honest)`,
+              "",
+              trackLine,
               "",
               "| run (UTC) | receipts |",
               "|---|---|",

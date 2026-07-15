@@ -84,3 +84,24 @@ GitHub-hosted CI runners are US-based, so that "fallback" could never
 fire where this engine actually runs (observed 2026-07-15). The
 autonomous ledger (see README) adds no new claims: it only accumulates
 the same signed receipts on a schedule.
+
+## Track-record protocol
+
+The track record (`bin/quant.mjs track`) is computed ONLY from
+DSSE-verified signal receipts checked against the pinned engine pubkey —
+unverifiable files are excluded and listed by name in the report (nothing
+silently dropped). Population is the FULL emission history: ALLOWED
+`ENTER_LONG` signals are scored; BLOCKED no-calls are tallied (refusing
+bad conditions is part of the record). For each scored signal,
+baseline = first daily close at/after the decision time and outcome =
+first daily close at/after decision time + horizon, BOTH from one source
+series (sha256-pinned per row); the DEX snapshot price is REPORTED
+context only and never enters the return math. Horizons not yet elapsed
+are UNAVAILABLE ("pending", with the date they become measurable);
+elapsed horizons with missing history are honest gaps. Hit-rate is a
+measured frequency of realized past outcomes — never a probability
+claim — and carries an in-band weak-evidence note below n=10. The report
+itself is DSSE-signed (predicate
+`https://szl.holdings/quant/track-record/v1`) and regenerated on every
+scheduled ledger run, so the scoreboard can be independently verified
+with the same `verify/verify.mjs` as any other receipt.

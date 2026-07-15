@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 19 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback
+npm test                      # 25 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -103,6 +103,31 @@ an append-only public record that grows without anyone touching it.
 - The CI signing key is a repo Actions secret; if it is absent the job
   **fails closed** rather than emit a single unsigned entry.
 
+## Verifiable track record — the anti-"calls account"
+
+```bash
+node bin/quant.mjs track --ledger ledger/   # → signed trackrecord_*.receipt.json
+```
+
+Scores every past signal against what the market actually did next — and
+the scoreboard is itself a DSSE-signed receipt:
+
+- inputs are **verified receipts only**, checked against the pinned
+  pubkey; tampered/unsigned files are excluded **by name** in the report;
+- **full population**: BLOCKED no-calls are counted, never hidden — the
+  engine's refusals are part of its record;
+- realized forward returns are **MEASURED**, baseline and outcome from ONE
+  source series (sha256-pinned); not-yet-elapsed horizons are honest
+  UNAVAILABLE "pending" entries — never guessed, never dropped;
+- hit-rate is a **past frequency, not a prediction**, and carries an
+  in-band weak-evidence note until n ≥ 10;
+- the scheduled ledger run regenerates it every ~6h, so the `ledger`
+  branch INDEX always shows the current honest scoreboard.
+
+An X "calls account" can delete its misses. This one cryptographically
+cannot: every call is signed at emission, and the scoreboard only counts
+what verifies.
+
 ## Resilient history ingest
 
 Daily history tries **CoinGecko public** (USD) first; if it fails (the
@@ -126,6 +151,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/ouroboros.mjs` | bounded loop + loop-tax ledger (adapted from szl-holdings/ouroboros) |
 | `src/portfolio.mjs` | deterministic paper book, integer micro-USD, MODELED costs |
 | `src/backtest.mjs` | walk-forward MEASURED replays, full-population reporting |
+| `src/track.mjs` | verifiable track record — scores VERIFIED signal receipts vs realized closes, full population, signed report |
 | `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |

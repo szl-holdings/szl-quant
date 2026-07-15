@@ -29,6 +29,16 @@ export const COINBASE_PRODUCTS = Object.freeze({
   dogwifcoin: 'WIF-USD',
 });
 
+/** Solana token address → CoinGecko id (single source of truth for the
+ *  live universe's history context; used by paper sessions AND the
+ *  track-record scorer so both always resolve assets identically). */
+export const HISTORY_IDS_BY_ADDRESS = Object.freeze({
+  So11111111111111111111111111111111111111112: 'solana',
+  DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: 'bonk',
+  EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: 'dogwifcoin',
+  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 'jupiter-exchange-solana',
+});
+
 /**
  * Fetch daily history for `coinId`, trying CoinGecko then Coinbase.
  * `deps` is injectable for tests. Returns the shared ingest contract
