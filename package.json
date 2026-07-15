@@ -1,0 +1,16 @@
+{
+  "name": "@szl-holdings/szl-quant",
+  "version": "0.1.0",
+  "description": "Doctrine-governed quant research engine — every advisory signal ships with a DSSE-signed receipt. Paper-only. Not financial advice.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test test/",
+    "backtest": "node bin/quant.mjs backtest",
+    "paper": "node bin/quant.mjs paper",
+    "verify": "node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
