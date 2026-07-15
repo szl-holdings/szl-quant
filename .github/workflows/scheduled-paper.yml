@@ -75,7 +75,11 @@ jobs:
           # receipt lands in this run's dir; then independently re-verify the
           # whole new dir (session + signals + track record) against the pin.
           node "$GITHUB_WORKSPACE/bin/quant.mjs" track --ledger ledger --out "$DEST" --histdays 60
+          # Seal the run into the hash chain (genesis backfills pre-chain runs),
+          # then verify this run dir AND walk the full chain independently.
+          node "$GITHUB_WORKSPACE/bin/quant.mjs" chain --ledger ledger --dest "$(basename "$DEST")"
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --dir "$DEST"
+          node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --chain ledger
           # Regenerate INDEX.md — counts MEASURED from the files actually present.
           node -e '
             const fs = require("node:fs");
@@ -100,6 +104,20 @@ jobs:
             const trackLine = track
               ? `Track record (latest, MEASURED from verified receipts only): ${Object.entries(track.aggregates).map(([k,a]) => `+${k.slice(1,-1)}d n=${a.nRealized} hit=${a.hitRate===null?"—":Math.round(a.hitRate*100)+"%"} pending=${a.nPending}`).join(" · ")} · no-calls(BLOCKED)=${track.population.blocked} — a past frequency, NOT a prediction`
               : "Track record: no track-record receipt yet.";
+            // Hash-chain headline from the newest chain receipt (fail-soft).
+            let chainLine = "Hash chain: no chain receipt yet.";
+            const cfs = [];
+            for (const d of dirs) for (const f of fs.readdirSync("ledger/"+d)) if (/^chain_\d{4}\.receipt\.json$/.test(f)) cfs.push("ledger/"+d+"/"+f);
+            if (cfs.length) {
+              try {
+                const crypto = require("node:crypto");
+                const byches = cfs.map(p => ({ p, body: JSON.parse(Buffer.from(JSON.parse(fs.readFileSync(p,"utf8")).payload,"base64").toString()).predicate.summary }));
+                byches.sort((a,b) => a.body.seq - b.body.seq);
+                const head = byches[byches.length-1];
+                const sha = crypto.createHash("sha256").update(fs.readFileSync(head.p)).digest("hex");
+                chainLine = `Hash chain: ${byches.length} link(s), head seq ${head.body.seq} sha256 ${sha.slice(0,12)}… — every sealed run tamper-evident; walk it: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/\``;
+              } catch {}
+            }
             const md = [
               "# szl-quant receipt ledger",
               "",
@@ -115,6 +133,8 @@ jobs:
               `Runs recorded: ${dirs.length} · receipts: ${total} (MEASURED from files present; cron is best-effort, gaps are honest)`,
               "",
               trackLine,
+              "",
+              chainLine,
               "",
               "| run (UTC) | receipts |",
               "|---|---|",

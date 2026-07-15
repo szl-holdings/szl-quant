@@ -278,3 +278,46 @@ test('track: full population — BLOCKED counted as no-calls, ALLOWED scored, we
   assert.equal(nc.scored, false);
   assert.match(nc.note, /no-call/);
 });
+
+// ── ledger hash chain ───────────────────────────────────────────────────────
+import { buildChainBody, scanLedgerForChain, CHAIN_FILE_RE } from '../src/chain.mjs';
+
+test('chain: genesis seals ALL run dirs with prev=null', () => {
+  const runDirs = [
+    { dir: 'r1', files: [{ name: 'a.json', sha256: 'h1' }] },
+    { dir: 'r2', files: [{ name: 'b.json', sha256: 'h2' }, { name: 'c.json', sha256: 'h3' }] },
+  ];
+  const b = buildChainBody({ runDirs, prevChain: null, coveredDirs: new Set(), nowIso: '2026-07-15T00:00:00.000Z' });
+  assert.equal(b.seq, 1);
+  assert.equal(b.prev, null);
+  assert.deepEqual(b.covers.map((c) => c.dir), ['r1', 'r2']);
+  assert.equal(b.coverage.files, 3);
+  assert.match(b.note, /GENESIS/);
+  assert.match(b.limits, /head truncation/);
+});
+
+test('chain: successor seals only unsealed dirs and pins prev by bytes-hash', () => {
+  const runDirs = [
+    { dir: 'r1', files: [{ name: 'a.json', sha256: 'h1' }] },
+    { dir: 'r2', files: [{ name: 'b.json', sha256: 'h2' }] },
+    { dir: 'r3', files: [{ name: 'd.json', sha256: 'h4' }] },
+  ];
+  const prevChain = { runDir: 'r2', file: 'chain_0001.receipt.json', sha256: 'prevsha', seq: 1 };
+  const b = buildChainBody({ runDirs, prevChain, coveredDirs: new Set(['r1', 'r2']), nowIso: '2026-07-15T00:00:00.000Z' });
+  assert.equal(b.seq, 2);
+  assert.deepEqual(b.prev, { runDir: 'r2', file: 'chain_0001.receipt.json', sha256: 'prevsha' });
+  assert.deepEqual(b.covers.map((c) => c.dir), ['r3']);
+});
+
+test('chain: nothing unsealed → honest null no-op; unreadable prev seq → fail closed', () => {
+  const runDirs = [{ dir: 'r1', files: [] }];
+  assert.equal(buildChainBody({ runDirs, prevChain: { seq: 1 }, coveredDirs: new Set(['r1']), nowIso: 'x' }), null);
+  assert.throws(() => buildChainBody({ runDirs, prevChain: { seq: null }, coveredDirs: new Set(), nowIso: 'x' }), /refusing to fork/);
+});
+
+test('chain: file-name pattern is strict (no spoofing via lookalike names)', () => {
+  assert.ok(CHAIN_FILE_RE.test('chain_0001.receipt.json'));
+  assert.ok(!CHAIN_FILE_RE.test('chain_1.receipt.json'));
+  assert.ok(!CHAIN_FILE_RE.test('xchain_0001.receipt.json'));
+  assert.ok(!CHAIN_FILE_RE.test('chain_0001.receipt.json.bak'));
+});

@@ -105,3 +105,19 @@ itself is DSSE-signed (predicate
 `https://szl.holdings/quant/track-record/v1`) and regenerated on every
 scheduled ledger run, so the scoreboard can be independently verified
 with the same `verify/verify.mjs` as any other receipt.
+
+## Ledger hash chain
+
+The ledger branch is append-only by convention; chain receipts (predicate
+`https://szl.holdings/quant/chain/v1`) make that convention checkable.
+Each scheduled run seals its run dir — sha256 of every non-chain receipt
+file — into a signed chain receipt that also pins the sha256 of the
+previous chain receipt's bytes. Genesis (seq 1) backfilled every
+pre-chain run dir. `verify/verify.mjs --chain ledger/` independently
+walks the chain: DSSE signature per link against the pinned key, seq
+contiguity from 1, prev-pointer byte-hash linkage, exactly-once dir
+coverage, and per-file sha256 equality against disk — so rewriting or
+deleting any sealed run breaks the walk loudly. Honest limit, stated
+in every link: wholesale deletion of the newest link(s) (head
+truncation) is not detectable by the chain alone; GitHub Actions run
+logs and the git history of INDEX.md act as external witnesses.
