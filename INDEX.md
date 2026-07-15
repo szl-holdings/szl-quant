@@ -9,11 +9,11 @@ Verify any entry independently:
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir ledger/<run-dir>/
 ```
 
-Runs recorded: 4 · receipts: 29 (MEASURED from files present; cron is best-effort, gaps are honest)
+Runs recorded: 5 · receipts: 38 (MEASURED from files present; cron is best-effort, gaps are honest)
 
-Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=15 — a past frequency, NOT a prediction
+Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=19 — a past frequency, NOT a prediction
 
-Hash chain: 2 link(s), head seq 2 sha256 fd4f05512cb6… — every sealed run tamper-evident; walk it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/`
+Hash chain: 3 link(s), head seq 3 sha256 d55dbab8c104… — every sealed run tamper-evident; walk it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/`
 
 | run (UTC) | receipts |
 |---|---|
@@ -21,5 +21,6 @@ Hash chain: 2 link(s), head seq 2 sha256 fd4f05512cb6… — every sealed run ta
 | 20260715T092114Z_run2 | 6 |
 | 20260715T094346Z_run3 | 9 |
 | 20260715T141549Z_run4 | 9 |
+| 20260715T194057Z_run5 | 9 |
 
 _Advisory research output. NOT financial advice. No execution, no custody._
