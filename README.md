@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 25 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record
+npm test                      # 29 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -102,6 +102,22 @@ an append-only public record that grows without anyone touching it.
   (UNAVAILABLE, zero signals) — silence is never dressed up as activity.
 - The CI signing key is a repo Actions secret; if it is absent the job
   **fails closed** rather than emit a single unsigned entry.
+
+## Hash-chained ledger — deletion becomes visible
+
+Every scheduled run seals its receipts into a signed **chain receipt**:
+sha256 of every file in the run dir, plus the sha256 of the previous
+chain receipt's bytes. Genesis (seq 1) backfilled every pre-chain run, so
+the whole history is locked from the first link. Walk it yourself:
+
+```bash
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/
+```
+
+Rewriting or deleting ANY sealed run now breaks the chain at that link.
+Honest limit, stated plainly: wholesale deletion of the newest link(s)
+(head truncation) is not detectable by the chain alone — GitHub Actions
+run logs and the git history of INDEX.md act as external witnesses.
 
 ## Verifiable track record — the anti-"calls account"
 
@@ -152,6 +168,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/portfolio.mjs` | deterministic paper book, integer micro-USD, MODELED costs |
 | `src/backtest.mjs` | walk-forward MEASURED replays, full-population reporting |
 | `src/track.mjs` | verifiable track record — scores VERIFIED signal receipts vs realized closes, full population, signed report |
+| `src/chain.mjs` | tamper-evident hash chain over ledger runs — signed links, genesis backfill, honest truncation limit |
 | `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |

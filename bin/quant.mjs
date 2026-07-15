@@ -5,6 +5,7 @@
  *   node bin/quant.mjs backtest [--days 365] [--out receipts/]
  *   node bin/quant.mjs paper    [--out receipts/]
  *   node bin/quant.mjs track    [--ledger ledger/] [--out receipts/] [--histdays 60]
+ *   node bin/quant.mjs chain    [--ledger ledger/] [--dest <run-dir>]
  *   node bin/quant.mjs verify   — delegates to verify/verify.mjs
  *
  * Advisory research system. PAPER ONLY. Not financial advice.
@@ -22,6 +23,7 @@ import { signReceipt, PREDICATE } from '../src/receipts.mjs';
 import { ensureIdentity, loadPublicKeyFromSpkiBase64 } from '../src/keys.mjs';
 import { verifyEnvelope } from '../src/dsse.mjs';
 import { verifySignalEnvelopes, buildTrackRecord, HORIZONS_DAYS } from '../src/track.mjs';
+import { scanLedgerForChain, buildChainBody } from '../src/chain.mjs';
 import { LABELS } from '../src/canon.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,6 +53,8 @@ const LIVE_TOKENS = [
   'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // BONK
   'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', // WIF
   'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  // JUP
+  'jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL',  // JTO  (coinbase JTO-USD fallback confirmed)
+  'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3', // PYTH (coinbase PYTH-USD fallback confirmed)
 ];
 /** CoinGecko ids for the same assets (single source of truth in ingest/history.mjs). */
 const LIVE_HISTORY_IDS = HISTORY_IDS_BY_ADDRESS;
@@ -264,11 +268,34 @@ async function cmdTrack() {
   console.log(`  signed track-record receipt → ${file}`);
 }
 
+async function cmdChain() {
+  const ledgerDir = arg('ledger', join(ROOT, 'ledger'));
+  const destArg = arg('dest', null);
+  const keys = ensureIdentity(KEY_PRIV, KEY_PUB_JSON);
+  const state = scanLedgerForChain(ledgerDir, { readdirSync, readFileSync });
+  if (state.runDirs.length === 0) { console.log(`chain: no run dirs under ${ledgerDir} — nothing to seal`); return; }
+  const body = buildChainBody({ runDirs: state.runDirs, prevChain: state.prevChain, coveredDirs: state.coveredDirs, nowIso: new Date().toISOString() });
+  if (body === null) { console.log('chain: every run dir already sealed — nothing new (honest no-op)'); return; }
+  const destDir = destArg ?? state.runDirs[state.runDirs.length - 1].dir;
+  if (!state.runDirs.some((r) => r.dir === destDir)) { console.error(`chain: dest dir ${destDir} not found under ${ledgerDir}`); process.exit(1); }
+  const { envelope } = signReceipt({
+    predicateType: PREDICATE.chain,
+    subjectName: `szl-quant/chain/${String(body.seq).padStart(4, '0')}`,
+    subjectBody: body,
+    predicate: { summary: body },
+    privateKey: keys.privateKey, publicKey: keys.publicKey,
+  });
+  const file = join(ledgerDir, destDir, `chain_${String(body.seq).padStart(4, '0')}.receipt.json`);
+  writeFileSync(file, JSON.stringify(envelope, null, 2) + '\n');
+  console.log(`chain: seq ${body.seq}${body.prev ? ` (prev ${body.prev.sha256.slice(0, 12)}…)` : ' (GENESIS — backfilled all prior runs)'} seals ${body.coverage.dirs} dir(s) / ${body.coverage.files} file(s) → ${file}`);
+}
+
 const cmd = process.argv[2];
 if (cmd === 'backtest') await cmdBacktest();
 else if (cmd === 'paper') await cmdPaper();
 else if (cmd === 'track') await cmdTrack();
+else if (cmd === 'chain') await cmdChain();
 else {
-  console.log('usage: node bin/quant.mjs <backtest|paper|track> [--days N] [--out DIR] [--ledger DIR]');
+  console.log('usage: node bin/quant.mjs <backtest|paper|track|chain> [--days N] [--out DIR] [--ledger DIR]');
   process.exit(2);
 }

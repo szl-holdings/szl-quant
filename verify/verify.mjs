@@ -8,6 +8,9 @@
  *   node verify/verify.mjs <receipt.json> [more.json ...]
  *   node verify/verify.mjs --dir receipts/
  *   node verify/verify.mjs --pubkey keys/engine_pubkey.json <receipt.json>
+ *   node verify/verify.mjs --chain ledger/   — walk the hash chain: DSSE per
+ *     link, seq contiguity, prev-pointer byte-hash linkage, exactly-once dir
+ *     coverage, per-file sha256 equality (rewrites/deletions become loud)
  *
  * Checks per receipt (ALL must pass):
  *   1. DSSE envelope: payloadType, base64 payload, ed25519 signature over
@@ -114,9 +117,76 @@ function verifyFile(file, pinnedKey) {
   return { file, ok: fails.length === 0, fails, notes, keyid };
 }
 
+// ---- chain walk (self-contained; trusts only the pinned key + disk) ----
+const CHAIN_RE = /^chain_\d{4}\.receipt\.json$/;
+
+function verifyChain(ledgerDir, pinnedKey) {
+  let dirs;
+  try {
+    dirs = readdirSync(ledgerDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch (e) { console.log(`CHAIN FAIL: cannot read ${ledgerDir}: ${e.message}`); return false; }
+  const problems = [];
+  const links = [];
+  const dirFiles = {};
+  for (const d of dirs) {
+    const names = readdirSync(join(ledgerDir, d), { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).sort();
+    dirFiles[d] = names.filter((n) => n.endsWith('.json') && !CHAIN_RE.test(n));
+    const chainFiles = names.filter((n) => CHAIN_RE.test(n));
+    if (chainFiles.length > 1) problems.push(`${d}: ${chainFiles.length} chain receipts in one dir (ambiguous)`);
+    for (const cf of chainFiles) {
+      const full = join(ledgerDir, d, cf);
+      const r = verifyFile(full, pinnedKey);
+      if (!r.ok) problems.push(`${d}/${cf}: link receipt fails verification: ${r.fails.join('; ')}`);
+      let body = null;
+      try { body = JSON.parse(Buffer.from(JSON.parse(readFileSync(full, 'utf8')).payload, 'base64').toString('utf8'))?.predicate?.summary ?? null; } catch { /* handled below */ }
+      if (!body || !Number.isInteger(body.seq)) { problems.push(`${d}/${cf}: unreadable chain body`); continue; }
+      links.push({ dir: d, file: cf, body, sha256: sha256Hex(readFileSync(full)) });
+    }
+  }
+  if (links.length === 0) { console.log('CHAIN FAIL: no chain receipts found under ' + ledgerDir); return false; }
+  links.sort((a, b) => a.body.seq - b.body.seq);
+  links.forEach((l, i) => { if (l.body.seq !== i + 1) problems.push(`seq not contiguous: expected ${i + 1}, found ${l.body.seq} (${l.dir}/${l.file})`); });
+  if (links[0] && links[0].body.prev !== null) problems.push(`first link (${links[0].dir}/${links[0].file}) is not genesis: prev ≠ null`);
+  for (let i = 1; i < links.length; i++) {
+    const prev = links[i].body.prev;
+    if (!prev) { problems.push(`seq ${links[i].body.seq}: missing prev pointer`); continue; }
+    if (prev.sha256 !== links[i - 1].sha256 || prev.file !== links[i - 1].file || prev.runDir !== links[i - 1].dir) {
+      problems.push(`seq ${links[i].body.seq}: prev pointer mismatch — chain BROKEN between ${links[i - 1].dir} and ${links[i].dir}`);
+    }
+  }
+  const covered = new Map();
+  for (const l of links) {
+    for (const cov of l.body.covers ?? []) {
+      if (covered.has(cov.dir)) problems.push(`dir ${cov.dir} sealed twice (seq ${covered.get(cov.dir).seq} and ${l.body.seq})`);
+      else covered.set(cov.dir, { files: cov.files ?? [], seq: l.body.seq });
+    }
+  }
+  for (const d of dirs) if (!covered.has(d)) problems.push(`dir ${d} NOT sealed by any chain link`);
+  for (const [d, cov] of covered) {
+    if (!dirs.includes(d)) { problems.push(`sealed dir ${d} MISSING from ledger (deleted after sealing)`); continue; }
+    const onDisk = dirFiles[d];
+    const listed = cov.files.map((f) => f.name).sort();
+    if (JSON.stringify(onDisk) !== JSON.stringify(listed)) problems.push(`dir ${d}: file set mismatch — on disk [${onDisk.join(', ')}] vs sealed [${listed.join(', ')}]`);
+    for (const f of cov.files) {
+      if (!onDisk.includes(f.name)) continue;
+      if (sha256Hex(readFileSync(join(ledgerDir, d, f.name))) !== f.sha256) problems.push(`${d}/${f.name}: sha256 mismatch — file REWRITTEN after sealing`);
+    }
+  }
+  for (const p of problems) console.log(`      CHAIN FAIL: ${p}`);
+  const head = links[links.length - 1];
+  if (problems.length === 0) {
+    console.log(`CHAIN OK  links=${links.length}  head=seq ${head.body.seq} sha256=${head.sha256.slice(0, 12)}…  dirs sealed=${covered.size}  files sealed=${[...covered.values()].reduce((a, c) => a + c.files.length, 0)}`);
+    console.log('      note: honest limit — wholesale deletion of the newest link(s) needs external witnesses (Actions logs, INDEX git history)');
+    return true;
+  }
+  console.log('CHAIN BROKEN');
+  return false;
+}
+
 // ---- main ----
 const args = process.argv.slice(2);
 let pinnedKey = null;
+let chainDir = null;
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--pubkey') {
@@ -127,10 +197,12 @@ for (let i = 0; i < args.length; i++) {
     for (const f of readdirSync(dir)) {
       if (f.endsWith('.json') && statSync(join(dir, f)).isFile()) files.push(join(dir, f));
     }
+  } else if (args[i] === '--chain') {
+    chainDir = args[++i];
   } else files.push(args[i]);
 }
-if (files.length === 0) {
-  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] (--dir receipts/ | receipt.json ...)');
+if (files.length === 0 && !chainDir) {
+  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] (--dir receipts/ | --chain ledger/ | receipt.json ...)');
   process.exit(2);
 }
 let allOk = true;
@@ -141,5 +213,6 @@ for (const f of files.sort()) {
   for (const n of r.notes ?? []) console.log(`      note: ${n}`);
   for (const x of r.fails ?? []) console.log(`      FAIL: ${x}`);
 }
-console.log(allOk ? `\nAll ${files.length} receipt(s) verified.` : '\nVERIFICATION FAILED');
+if (files.length > 0) console.log(allOk ? `\nAll ${files.length} receipt(s) verified.` : '\nVERIFICATION FAILED');
+if (chainDir) allOk = verifyChain(chainDir, pinnedKey) && allOk;
 process.exit(allOk ? 0 : 1);

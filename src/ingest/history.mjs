@@ -27,6 +27,8 @@ export const COINBASE_PRODUCTS = Object.freeze({
   solana: 'SOL-USD',
   bonk: 'BONK-USD',
   dogwifcoin: 'WIF-USD',
+  'jito-governance-token': 'JTO-USD',   // candles verified non-empty 2026-07-15
+  'pyth-network': 'PYTH-USD',           // candles verified non-empty 2026-07-15
 });
 
 /** Solana token address → CoinGecko id (single source of truth for the
@@ -37,6 +39,8 @@ export const HISTORY_IDS_BY_ADDRESS = Object.freeze({
   DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: 'bonk',
   EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: 'dogwifcoin',
   JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: 'jupiter-exchange-solana',
+  jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL: 'jito-governance-token',
+  HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3: 'pyth-network',
 });
 
 /**
