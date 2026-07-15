@@ -1,0 +1,109 @@
+# scheduled-paper.yml — autonomous receipt ledger.
+#
+# Every ~6h: run one advisory paper session on live public feeds, DSSE-sign
+# every decision, INDEPENDENTLY verify the fresh receipts against the pinned
+# engine pubkey, then append them to the unprotected `ledger` data branch
+# (org house pattern: attestations/status-style data branches).
+#
+# Honesty notes:
+#   - GitHub cron is best-effort; gaps in the ledger mean runs did not fire
+#     or feeds were down — the ledger MEASURES what happened, promises nothing.
+#   - The signing key comes from a repo Actions secret; if it is missing the
+#     job FAILS CLOSED — no unsigned entries, ever.
+#   - Feeds down ⇒ the session still emits honest BLOCKED/UNAVAILABLE
+#     receipts; an "empty" run is a truthful run.
+# All actions pinned to full-length commit SHAs (org convention).
+name: scheduled-paper
+on:
+  schedule:
+    - cron: '17 */6 * * *'   # offset minute; GitHub drops top-of-hour crons more often
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: scheduled-paper
+  cancel-in-progress: false
+jobs:
+  paper-session:
+    if: github.repository == 'szl-holdings/szl-quant'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Materialize signing key (fail closed if absent)
+        env:
+          SIGNING_KEY_PEM: ${{ secrets.SZL_QUANT_SIGNING_KEY_PEM }}
+        run: |
+          umask 077
+          if [ -z "$SIGNING_KEY_PEM" ]; then
+            echo "::error::SZL_QUANT_SIGNING_KEY_PEM secret is missing — refusing to run unsigned (fail closed)"
+            exit 1
+          fi
+          printf '%s\n' "$SIGNING_KEY_PEM" > "$RUNNER_TEMP/engine_key.pem"
+      - name: Run paper session (advisory, paper-only)
+        env:
+          SZL_QUANT_KEY: ${{ runner.temp }}/engine_key.pem
+        run: |
+          mkdir -p "$RUNNER_TEMP/receipts"
+          node bin/quant.mjs paper --out "$RUNNER_TEMP/receipts"
+      - name: Independently verify fresh receipts against pinned pubkey
+        run: node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir "$RUNNER_TEMP/receipts"
+      - name: Append receipts to ledger branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          DEST="ledger/${STAMP}_run${GITHUB_RUN_NUMBER}"
+          WORK=/tmp/ledger-work
+          mkdir -p "$WORK" && cd "$WORK"
+          git init -q -b ledger .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q origin ledger 2>/dev/null; then
+            git reset -q --hard FETCH_HEAD
+          else
+            echo "no ledger branch yet — creating it (first entry)"
+          fi
+          mkdir -p "$DEST"
+          cp "$RUNNER_TEMP"/receipts/*.json "$DEST"/
+          # Regenerate INDEX.md — counts MEASURED from the files actually present.
+          node -e '
+            const fs = require("node:fs");
+            const dirs = fs.existsSync("ledger") ? fs.readdirSync("ledger").filter(d => fs.statSync("ledger/"+d).isDirectory()).sort() : [];
+            let total = 0;
+            const rows = dirs.map(d => {
+              const files = fs.readdirSync("ledger/"+d).filter(f => f.endsWith(".json"));
+              total += files.length;
+              return `| ${d} | ${files.length} |`;
+            });
+            const md = [
+              "# szl-quant receipt ledger",
+              "",
+              "Append-only DSSE receipt ledger written by the `scheduled-paper` workflow.",
+              "Every file is an advisory **paper-only** decision receipt, ed25519-signed by the",
+              "engine identity pinned at `keys/engine_pubkey.json` on `main`.",
+              "",
+              "Verify any entry independently:",
+              "```",
+              "node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir ledger/<run-dir>/",
+              "```",
+              "",
+              `Runs recorded: ${dirs.length} · receipts: ${total} (MEASURED from files present; cron is best-effort, gaps are honest)`,
+              "",
+              "| run (UTC) | receipts |",
+              "|---|---|",
+              ...rows,
+              "",
+              "_Advisory research output. NOT financial advice. No execution, no custody._",
+              ""
+            ].join("\n");
+            fs.writeFileSync("INDEX.md", md);
+          '
+          git add -A
+          git commit -q -m "ledger: paper session ${STAMP} (run ${GITHUB_RUN_ID})"
+          git push -q origin ledger
+          echo "appended $(ls "$DEST" | wc -l) receipt(s) → ${DEST}"

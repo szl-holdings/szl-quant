@@ -40,7 +40,7 @@ an honest **BLOCKED** verdict inside the signed record.
 
 ```
 ingest (REPORTED feeds)            doctrine layer
-  coingecko daily history   ┐        · honesty labels on every value
+  daily history cg→coinbase ┐        · honesty labels on every value
   dexscreener live pairs    ├──►  strategy (HEURISTIC, formula-canon Λ roll-up)
                             │        · tsmom + meanrev → Λ conviction ≤ 0.97
                             │      risk gates (FAIL CLOSED → BLOCKED verdicts)
@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 14 unit tests: doctrine invariants, DSSE, gates, determinism
+npm test                      # 19 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -86,6 +86,35 @@ signals, still signed) — it never synthesizes a number.
 - ❌ It does **NOT** upgrade advisory Λ to proven trust — `provenTrust` is
   structurally locked `false` (govsign pattern).
 
+## Autonomous receipt ledger
+
+The [`scheduled-paper` workflow](.github/workflows/scheduled-paper.yml) runs
+a paper session roughly every 6 hours, independently re-verifies the fresh
+receipts against the pinned pubkey, and appends them to the
+[`ledger` branch](https://github.com/szl-holdings/szl-quant/tree/ledger) —
+an append-only public record that grows without anyone touching it.
+
+- Verify any entry offline:
+  `node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir ledger/<run-dir>/`
+- GitHub cron is best-effort: **gaps are honest** — the ledger MEASURES what
+  actually ran; it promises nothing.
+- Feeds down ⇒ the run still lands an honest-empty session receipt
+  (UNAVAILABLE, zero signals) — silence is never dressed up as activity.
+- The CI signing key is a repo Actions secret; if it is absent the job
+  **fails closed** rather than emit a single unsigned entry.
+
+## Resilient history ingest
+
+Daily history tries **CoinGecko public** (USD) first; if it fails (the
+shared public tier throttles hard), the engine falls back to **Coinbase
+Exchange public candles** (genuine USD quotes). Both are external feeds ⇒
+**REPORTED**. The receipt's dataset block pins the serving source, URL,
+sha256 of the exact series bytes, and a `sourceChain` recording every
+attempt. One series, one source — stitching is forbidden. Both down ⇒
+**UNAVAILABLE**, fail closed. (Binance was evaluated and rejected for
+this role: HTTP 451 geo-restriction from US egress, where both dev and
+CI runners live — a fallback that cannot fire is not resilience.)
+
 ## Repo map
 
 | Path | What |
@@ -97,11 +126,13 @@ signals, still signed) — it never synthesizes a number.
 | `src/ouroboros.mjs` | bounded loop + loop-tax ledger (adapted from szl-holdings/ouroboros) |
 | `src/portfolio.mjs` | deterministic paper book, integer micro-USD, MODELED costs |
 | `src/backtest.mjs` | walk-forward MEASURED replays, full-population reporting |
+| `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |
 | `docs/RESEARCH_MEMO.md` | leaders studied → lessons → what SZL does differently |
 | `docs/METHODOLOGY.md` | backtest protocol + honest limits |
 | `.github/workflows/ci.yml` | CI: unit tests + receipt verification on every push/PR (SHA-pinned actions) |
+| `.github/workflows/scheduled-paper.yml` | autonomous ledger: paper session every ~6h → verify → append to `ledger` branch |
 
 ## Formula-canon honesty
 
