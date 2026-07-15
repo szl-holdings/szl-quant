@@ -1,0 +1,66 @@
+# Methodology — and its honest limits
+
+Every number this engine emits carries a canon label. This file states what
+the labels mean HERE, and exactly what the backtests do and do not show.
+
+## Data
+
+| Source | What | Label | Why |
+|---|---|---|---|
+| CoinGecko public API | daily close history | **REPORTED** | external feed; we did not verify venue prints |
+| Dexscreener public API | live pair snapshots (price, liquidity, 24h volume) | **REPORTED** | external feed; unverified |
+| Backtest replay of pinned history | return, drawdown, trade counts | **MEASURED** | deterministic replay of real observed history; dataset sha256 pinned in the receipt |
+| Fee + slippage model (30 bps + 20 bps) | simulated fill costs | **MODELED** | assumption, not observation — stated in every fill |
+| Strategy transforms (momentum squash, z-score, Hoeffding-shape confidence) | component scores | **HEURISTIC** | rule-based; market iid/boundedness assumptions do not hold |
+| Feed failure / missing price | — | **UNAVAILABLE** | carries NO value; the engine abstains or BLOCKS, it never fills gaps |
+
+## Backtest protocol (MEASURED)
+
+- Daily bars; decisions at close *t* are filled at close *t+1* — no lookahead.
+- Long-only, no leverage, no shorting (v1 paper book enforces this in code).
+- Costs applied to every simulated fill, embedded in the effective price
+  (charged exactly once).
+- Walk-forward split: first 70% in-sample, remainder out-of-sample.
+- The **full parameter population is reported** — every config in the declared
+  grid, both windows. Picking the best cell after the fact is multiple
+  testing (Bailey & López de Prado); the receipt keeps the whole population
+  visible so nobody (including us) can quietly cherry-pick.
+
+## What the backtests do NOT show
+
+- **No predictive claim.** MEASURED means "this replay of that history
+  produced these numbers" — nothing more. Past performance does not predict
+  future results.
+- **Small-n warnings are in-band:** win rates on fewer than 10 round trips
+  are flagged as statistically weak evidence inside the result itself.
+- **Deflated expectations:** with a 5-config grid there is nonzero
+  probability the best cell is luck. We report the population instead of a
+  "deflated Sharpe" figure because our n (daily bars, one asset per replay)
+  is too small for that statistic to be honest.
+- **Costs are MODELED.** Real Solana memecoin slippage is regime-dependent
+  and can exceed 20 bps badly in thin books; the liquidity gate exists
+  precisely because the cost model goes wrong in thin pools.
+- Λ conviction roll-ups are **ADVISORY** (Λ uniqueness = Conjecture 1, open).
+  Conviction is capped at the 0.97 trust ceiling; nothing here reaches
+  certainty, by law.
+
+## Risk gates (fail closed)
+
+posture (paper-only, structural) · loop-tax budget (ouroboros ledger) ·
+data freshness · sample size · liquidity floors · volatility ceiling ·
+conviction floor + trust-ceiling law. ANY blocked gate ⇒ the decision
+verdict is **BLOCKED**, signed as BLOCKED, with the blocking gates and
+their reasons in the receipt. There is no code path that flips a verdict.
+
+## Receipts
+
+Every signal decision, backtest run, and paper session is wrapped in a
+DSSE envelope (spec-exact PAE, ed25519, keyid = sha256(SPKI)[:16]) over an
+in-toto v1 Statement. `verify/verify.mjs` is an independent verifier that
+imports nothing from `src/` — it re-implements canonicalization, PAE and
+the doctrine checks, so a third party can audit receipts without trusting
+engine code. Verify with:
+
+```bash
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
+```
