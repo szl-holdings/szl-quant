@@ -101,7 +101,7 @@ signals, still signed) — it never synthesizes a number.
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |
 | `docs/RESEARCH_MEMO.md` | leaders studied → lessons → what SZL does differently |
 | `docs/METHODOLOGY.md` | backtest protocol + honest limits |
-| `scripts/ci.workflow.yml` | CI (owner move to `.github/workflows/` — see `scripts/ACTIVATE_CI.md`) |
+| `.github/workflows/ci.yml` | CI: unit tests + receipt verification on every push/PR (SHA-pinned actions) |
 
 ## Formula-canon honesty
 
