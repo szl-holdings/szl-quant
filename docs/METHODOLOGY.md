@@ -64,3 +64,23 @@ engine code. Verify with:
 ```bash
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
 ```
+
+## Data sources & fallback honesty
+
+Daily history: **CoinGecko public** (USD) is primary; on failure the engine
+falls back to **Coinbase Exchange public candles** (genuine USD quotes,
+≤300 daily buckets per windowed request — a 365d fetch pages twice). Both
+feeds are external ⇒ **REPORTED**. Every receipt's dataset block pins the
+serving source, its URL, the exact series bytes (sha256) and a
+`sourceChain` listing every attempt and outcome. One series always comes
+from ONE source — mixed-source stitching is forbidden. Both sources down ⇒
+**UNAVAILABLE**, fail closed: nothing cached, nothing synthesized. Live
+pair snapshots come from Dexscreener public (REPORTED).
+
+Source selection was itself measured, not assumed: Binance public klines
+were evaluated first and **rejected** — api.binance.com answers HTTP 451
+(geo-restricted) from US egress, and both the dev environment and
+GitHub-hosted CI runners are US-based, so that "fallback" could never
+fire where this engine actually runs (observed 2026-07-15). The
+autonomous ledger (see README) adds no new claims: it only accumulates
+the same signed receipts on a schedule.

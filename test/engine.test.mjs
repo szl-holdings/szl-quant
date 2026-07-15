@@ -145,3 +145,62 @@ test('signal receipts carry doctrine block and verify end-to-end', () => {
   assert.equal(v.payload.predicate._doctrine.trustCeiling, 0.97);
   assert.equal(v.payload.predicate.decision.verdict, 'BLOCKED'); // BLOCKED stays BLOCKED
 });
+
+// ── resilient history ingest (coingecko → coinbase fallback) ───────────────
+import { parseCandles } from '../src/ingest/coinbase.mjs';
+import { fetchDailyHistoryResilient, COINBASE_PRODUCTS } from '../src/ingest/history.mjs';
+
+test('coinbase parseCandles: closed candles only, ascending, deduped', () => {
+  const day = 86400;
+  const t0 = 1700000000 - (1700000000 % day); // aligned bucket starts (sec)
+  const now = (t0 + 2 * day + 1000) * 1000;   // t0 and t0+1d closed; t0+2d still open
+  // Coinbase rows are newest-first: [time, low, high, open, close, volume]
+  const rows = [
+    [t0 + 2 * day, 1, 2, 1, 3.5, 10],   // still forming → drop
+    [t0 + day, 1, 2, 1, 2.5, 10],       // closed, ok
+    [t0, 1, 2, 1, 1.5, 10],             // closed, ok
+    [t0, 1, 2, 1, 1.5, 10],             // duplicate bucket → dedupe
+    [t0 - day, 1, 2, 1, 'nan', 10],     // bad close → drop
+  ];
+  const s = parseCandles(rows, now);
+  assert.deepEqual(s, [{ tMs: t0 * 1000, close: 1.5 }, { tMs: (t0 + day) * 1000, close: 2.5 }]);
+  assert.deepEqual(parseCandles(null, now), []);
+});
+
+test('resilient history: primary ok → coingecko serves, chain records it', async () => {
+  const fake = { ok: true, series: [{ tMs: 1, close: 2 }], dataset: { source: 'coingecko-public' } };
+  const r = await fetchDailyHistoryResilient('bitcoin', 30, { primary: async () => fake, secondary: async () => { throw new Error('must not be called'); } });
+  assert.equal(r.ok, true);
+  assert.equal(r.dataset.source, 'coingecko-public');
+  assert.deepEqual(r.dataset.sourceChain, [{ source: 'coingecko-public', outcome: 'ok' }]);
+});
+
+test('resilient history: primary 429 → coinbase fallback, honest chain, no stitching', async () => {
+  const cgFail = { ok: false, unavailable: { label: 'UNAVAILABLE', note: 'coingecko bitcoin: HTTP 429' } };
+  const cb = { ok: true, series: [{ tMs: 1, close: 2 }, { tMs: 2, close: 3 }], dataset: { source: 'coinbase-exchange-public', vsCurrency: 'USD' } };
+  const r = await fetchDailyHistoryResilient('bitcoin', 30, { primary: async () => cgFail, secondary: async (product) => { assert.equal(product, 'BTC-USD'); return cb; } });
+  assert.equal(r.ok, true);
+  assert.equal(r.dataset.source, 'coinbase-exchange-public');
+  assert.equal(r.dataset.sourceChain.length, 2);
+  assert.equal(r.dataset.sourceChain[0].outcome, 'unavailable');
+  assert.match(r.dataset.sourceChain[0].note, /429/);
+  assert.equal(r.dataset.sourceChain[1].outcome, 'ok');
+});
+
+test('resilient history: both down → UNAVAILABLE with full chain (fail closed)', async () => {
+  const fail = (note) => ({ ok: false, unavailable: { label: 'UNAVAILABLE', note } });
+  const r = await fetchDailyHistoryResilient('solana', 30, { primary: async () => fail('cg down'), secondary: async () => fail('bn down') });
+  assert.equal(r.ok, false);
+  assert.equal(r.unavailable.label, 'UNAVAILABLE');
+  assert.match(r.unavailable.note, /cg down/);
+  assert.match(r.unavailable.note, /bn down/);
+  assert.equal(r.unavailable.sourceChain.length, 2);
+});
+
+test('resilient history: unmapped asset with primary down → honest UNAVAILABLE, not a guess', async () => {
+  const fail = { ok: false, unavailable: { label: 'UNAVAILABLE', note: 'cg down' } };
+  const r = await fetchDailyHistoryResilient('some-unmapped-coin', 30, { primary: async () => fail, secondary: async () => { throw new Error('must not be called'); } });
+  assert.equal(r.ok, false);
+  assert.match(r.unavailable.note, /no Coinbase product mapping/);
+  assert.equal(COINBASE_PRODUCTS['some-unmapped-coin'], undefined);
+});

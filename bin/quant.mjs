@@ -11,7 +11,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchDailyHistory, RATE_DELAY_MS, sleep } from '../src/ingest/coingecko.mjs';
+import { RATE_DELAY_MS, sleep } from '../src/ingest/coingecko.mjs';
+import { fetchDailyHistoryResilient } from '../src/ingest/history.mjs';
 import { fetchSolanaPairs, deepestPairs } from '../src/ingest/dexscreener.mjs';
 import { walkForward } from '../src/backtest.mjs';
 import { decideLive, DEFAULT_PARAMS, DEFAULT_LIMITS } from '../src/engine.mjs';
@@ -71,14 +72,14 @@ async function cmdBacktest() {
   console.log(`engine keyId=${keys.keyId} (pubkey committed at keys/engine_pubkey.json; private key NOT in repo)`);
 
   for (const { coinId, symbol } of BACKTEST_UNIVERSE) {
-    console.log(`\n=== ${symbol} (${coinId}) — fetching ${days}d real history (coingecko public, REPORTED feed) ===`);
-    const hist = await fetchDailyHistory(coinId, days);
+    console.log(`\n=== ${symbol} (${coinId}) — fetching ${days}d real history (coingecko public → coinbase fallback, REPORTED feed) ===`);
+    const hist = await fetchDailyHistoryResilient(coinId, days);
     if (!hist.ok) {
       console.log(`  ${LABELS.UNAVAILABLE}: ${hist.unavailable.note} — no backtest for ${symbol} (fail closed, nothing invented)`);
       await sleep(RATE_DELAY_MS);
       continue;
     }
-    console.log(`  dataset n=${hist.dataset.n} ${hist.dataset.firstIso} → ${hist.dataset.lastIso} sha256=${hist.dataset.sha256.slice(0, 16)}…`);
+    console.log(`  dataset src=${hist.dataset.source} n=${hist.dataset.n} ${hist.dataset.firstIso} → ${hist.dataset.lastIso} sha256=${hist.dataset.sha256.slice(0, 16)}…`);
     const wf = walkForward(hist.series, GRID, COST_MODEL);
     const summary = {
       asset: { symbol, coinId },
@@ -156,7 +157,7 @@ async function cmdPaper() {
   for (const p of pairs) {
     const id = LIVE_HISTORY_IDS[p.baseAddress];
     if (!id) { histByAddr[p.baseAddress] = { ok: false, unavailable: { label: 'UNAVAILABLE', note: 'no history mapping for token' } }; continue; }
-    histByAddr[p.baseAddress] = await fetchDailyHistory(id, 120);
+    histByAddr[p.baseAddress] = await fetchDailyHistoryResilient(id, 120);
     await sleep(RATE_DELAY_MS);
   }
 
@@ -189,7 +190,7 @@ async function cmdPaper() {
 
   const summary = {
     session: new Date(nowMs).toISOString(),
-    feed: 'dexscreener [REPORTED] + coingecko history [REPORTED]',
+    feed: 'dexscreener [REPORTED] + coingecko→coinbase daily history [REPORTED]',
     decisions: decisions.map((d) => ({ asset: d.decision.asset.symbol, action: d.decision.proposedAction, verdict: d.decision.verdict, blockedBy: d.decision.blockedBy })),
     ouroboros: { trace: { id: trace.id, label: trace.label, exitReason: trace.exitReason, stepsRun: trace.stepsRun, maxSteps: trace.maxSteps }, loopTax: { budget: ledger.budget, spent: ledger.spent, remaining: ledger.remaining } },
   };
