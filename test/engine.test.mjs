@@ -315,6 +315,84 @@ test('chain: nothing unsealed → honest null no-op; unreadable prev seq → fai
   assert.throws(() => buildChainBody({ runDirs, prevChain: { seq: null }, coveredDirs: new Set(), nowIso: 'x' }), /refusing to fork/);
 });
 
+// ── stateful paper book ─────────────────────────────────────────────────────
+import { buildBookBody, DEFAULT_BOOK_CONFIG, BOOK_FILE_RE, decisionForBook } from '../src/book.mjs';
+
+const D = (symbol, proposedAction, verdict, priceUsd, file) => ({ file: file ?? `signal_${symbol}_1.receipt.json`, symbol, proposedAction, verdict, priceUsd, observedAtIso: '2026-07-16T00:00:00.000Z' });
+
+test('book: genesis fills ALLOWED ENTER_LONG at entry fraction of equity; BLOCKED holds the book', () => {
+  const b = buildBookBody({ prevBook: null, decisions: [D('AAA', 'ENTER_LONG', 'ALLOWED', 2), D('BBB', 'ENTER_LONG', 'BLOCKED', 3)], runDir: 'r2', nowIso: 'T', allRunDirs: ['r1', 'r2'] });
+  assert.equal(b.seq, 1);
+  assert.equal(b.prev, null);
+  assert.deepEqual(b.preBookRunDirs, ['r1']); // pre-book era declared, never backfilled
+  assert.equal(b.fills.length, 1);
+  assert.equal(b.fills[0].notionalUsd, '1000.000000'); // 10% of 10k starting equity
+  assert.equal(b.state.cashMicro, (9000n * 1_000_000n).toString());
+  assert.ok(b.noActions.some((n) => n.asset === 'BBB' && /fail closed/.test(n.why)));
+  assert.notEqual(b.mark.equityUsd, null);
+});
+
+test('book: insufficient cash → honest SKIPPED, never leverage', () => {
+  const cfg = { startingCashUsd: 100, entryFractionBps: 10_000, costModel: { feeBps: 30, slippageBps: 20 } };
+  const b = buildBookBody({ prevBook: null, decisions: [D('AAA', 'ENTER_LONG', 'ALLOWED', 1), D('BBB', 'ENTER_LONG', 'ALLOWED', 1)], runDir: 'r1', nowIso: 'T', allRunDirs: ['r1'], config: cfg });
+  assert.equal(b.fills.length, 1);
+  const skipped = b.noActions.find((n) => n.action === 'SKIPPED_INSUFFICIENT_CASH');
+  assert.ok(skipped && skipped.asset === 'BBB' && /no leverage/.test(skipped.why));
+});
+
+test('book: successor resurrects state, EXIT realizes, prev pinned by bytes-hash', () => {
+  const g = buildBookBody({ prevBook: null, decisions: [D('AAA', 'ENTER_LONG', 'ALLOWED', 2)], runDir: 'r1', nowIso: 'T', allRunDirs: ['r1'] });
+  const prevBook = { runDir: 'r1', file: 'book_1.receipt.json', sha256: 'sha-prev', body: g };
+  const s = buildBookBody({ prevBook, decisions: [D('AAA', 'EXIT_LONG', 'ALLOWED', 4)], runDir: 'r2', nowIso: 'T2', allRunDirs: ['r1', 'r2'] });
+  assert.equal(s.seq, 2);
+  assert.deepEqual(s.prev, { runDir: 'r1', file: 'book_1.receipt.json', sha256: 'sha-prev' });
+  assert.deepEqual(s.skippedRunDirs, []);
+  assert.equal(s.fills.length, 1);
+  assert.equal(s.fills[0].side, 'SELL');
+  assert.deepEqual(s.state.positions, {});
+  assert.ok(BigInt(s.state.cashMicro) > 10_000n * 1_000_000n); // price doubled → paper gain net of MODELED costs
+  assert.equal(s.mark.equityUsd, s.mark.cashUsd);
+});
+
+test('book: no pyramiding; unpriced open position blocks new entries (fail closed)', () => {
+  const g = buildBookBody({ prevBook: null, decisions: [D('AAA', 'ENTER_LONG', 'ALLOWED', 2)], runDir: 'r1', nowIso: 'T', allRunDirs: ['r1'] });
+  const prevBook = { runDir: 'r1', file: 'book_1.receipt.json', sha256: 'x', body: g };
+  const s = buildBookBody({ prevBook, decisions: [D('AAA', 'ENTER_LONG', 'ALLOWED', 2.2), D('BBB', 'ENTER_LONG', 'ALLOWED', 1)], runDir: 'r2', nowIso: 'T2', allRunDirs: ['r1', 'r2'] });
+  assert.ok(s.noActions.some((n) => n.asset === 'AAA' && /no pyramiding/.test(n.why)));
+  assert.equal(s.fills.length, 1); // BBB enters — AAA is priced by its own decision snapshot
+  const s2 = buildBookBody({ prevBook, decisions: [D('BBB', 'ENTER_LONG', 'ALLOWED', 1)], runDir: 'r2', nowIso: 'T2', allRunDirs: ['r1', 'r2'] });
+  assert.equal(s2.fills.length, 0); // AAA unpriced today → equity unknowable → no new entries
+  assert.ok(s2.noActions.some((n) => n.asset === 'BBB' && /unpriced/.test(n.why)));
+  assert.equal(s2.mark.equityUsd, null); // honest empty
+  assert.ok(s2.mark.equityNote);
+});
+
+test('book: unreadable prev seq → refuses to fork; config inherited with honest note', () => {
+  assert.throws(
+    () => buildBookBody({ prevBook: { runDir: 'r1', file: 'book_1.receipt.json', sha256: 'x', body: null }, decisions: [], runDir: 'r2', nowIso: 'T', allRunDirs: ['r1', 'r2'] }),
+    /refusing to fork/,
+  );
+  const cfg = { startingCashUsd: 500, entryFractionBps: 2000, costModel: { feeBps: 1, slippageBps: 2 } };
+  const g = buildBookBody({ prevBook: null, decisions: [], runDir: 'r1', nowIso: 'T', allRunDirs: ['r1'], config: cfg });
+  const s = buildBookBody({ prevBook: { runDir: 'r1', file: 'book_1.receipt.json', sha256: 'x', body: g }, decisions: [], runDir: 'r2', nowIso: 'T', allRunDirs: ['r1', 'r2'] });
+  assert.deepEqual(s.config, cfg); // inherited from the chain, NOT engine defaults
+  assert.ok(/INHERITED/.test(s.configNote ?? ''));
+  assert.notDeepEqual(cfg, DEFAULT_BOOK_CONFIG);
+});
+
+test('book: file-name pattern is strict (no spoofing via lookalike names)', () => {
+  assert.ok(BOOK_FILE_RE.test('book_1784108626307.receipt.json'));
+  assert.ok(!BOOK_FILE_RE.test('book_.receipt.json'));
+  assert.ok(!BOOK_FILE_RE.test('xbook_1.receipt.json'));
+  assert.ok(!BOOK_FILE_RE.test('book_1.receipt.json.bak'));
+});
+
+test('book: decisionForBook extracts exactly the acted-on fields, null on shape miss', () => {
+  const st = { predicate: { decision: { asset: { symbol: 'SOL' }, proposedAction: 'HOLD', verdict: 'ALLOWED', snapshot: { priceUsd: 100, observedAtIso: 'T' } } } };
+  assert.deepEqual(decisionForBook('f.json', st), { file: 'f.json', symbol: 'SOL', proposedAction: 'HOLD', verdict: 'ALLOWED', priceUsd: 100, observedAtIso: 'T' });
+  assert.equal(decisionForBook('f.json', { predicate: {} }), null);
+});
+
 test('chain: file-name pattern is strict (no spoofing via lookalike names)', () => {
   assert.ok(CHAIN_FILE_RE.test('chain_0001.receipt.json'));
   assert.ok(!CHAIN_FILE_RE.test('chain_1.receipt.json'));

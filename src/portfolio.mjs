@@ -41,7 +41,7 @@ export function makeBook({ startingCashUsd, costModel }) {
   };
 }
 
-const QTY = 1_000_000_000n; // 1e-9 asset units
+export const QTY = 1_000_000_000n; // 1e-9 asset units
 
 /**
  * Apply a paper fill. Costs (fee+slippage) are embedded in the effective

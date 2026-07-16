@@ -75,11 +75,16 @@ jobs:
           # receipt lands in this run's dir; then independently re-verify the
           # whole new dir (session + signals + track record) against the pin.
           node "$GITHUB_WORKSPACE/bin/quant.mjs" track --ledger ledger --out "$DEST" --histdays 60
+          # Advance the stateful paper book from THIS run's verified decisions
+          # (genesis starts the paper fund; prior runs stay advisory-only).
+          node "$GITHUB_WORKSPACE/bin/quant.mjs" book --ledger ledger --dest "$(basename "$DEST")"
           # Seal the run into the hash chain (genesis backfills pre-chain runs),
-          # then verify this run dir AND walk the full chain independently.
+          # then verify this run dir, walk the full chain, AND replay the book
+          # independently — the publish fails closed if any check fails.
           node "$GITHUB_WORKSPACE/bin/quant.mjs" chain --ledger ledger --dest "$(basename "$DEST")"
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --dir "$DEST"
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --chain ledger
+          node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --book ledger
           # Regenerate INDEX.md — counts MEASURED from the files actually present.
           node -e '
             const fs = require("node:fs");
@@ -104,6 +109,19 @@ jobs:
             const trackLine = track
               ? `Track record (latest, MEASURED from verified receipts only): ${Object.entries(track.aggregates).map(([k,a]) => `+${k.slice(1,-1)}d n=${a.nRealized} hit=${a.hitRate===null?"—":Math.round(a.hitRate*100)+"%"} pending=${a.nPending}`).join(" · ")} · no-calls(BLOCKED)=${track.population.blocked} — a past frequency, NOT a prediction`
               : "Track record: no track-record receipt yet.";
+            // Paper-book headline from the highest-seq book receipt (fail-soft).
+            let bookLine = "Paper book: no book receipt yet.";
+            const bfs = [];
+            for (const d of dirs) for (const f of fs.readdirSync("ledger/"+d)) if (/^book_\d+\.receipt\.json$/.test(f)) bfs.push("ledger/"+d+"/"+f);
+            if (bfs.length) {
+              try {
+                const bodies = bfs.map(p => JSON.parse(Buffer.from(JSON.parse(fs.readFileSync(p,"utf8")).payload,"base64").toString()).predicate.summary);
+                bodies.sort((a,b) => a.seq - b.seq);
+                const h = bodies[bodies.length-1];
+                const eq = h.mark.equityUsd === null ? "UNAVAILABLE (unpriced positions — honest empty)" : "$"+h.mark.equityUsd;
+                bookLine = `Paper book (MODELED, paper-only — NOT real funds): seq ${h.seq} · equity ${eq} · open positions ${(h.mark.positions||[]).length} · fills this run ${h.fills.length} · replay it: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --book ledger/\``;
+              } catch {}
+            }
             // Hash-chain headline from the newest chain receipt (fail-soft).
             let chainLine = "Hash chain: no chain receipt yet.";
             const cfs = [];
@@ -136,6 +154,8 @@ jobs:
               "",
               chainLine,
               "",
+              bookLine,
+              "",
               "| run (UTC) | receipts |",
               "|---|---|",
               ...rows,
@@ -145,6 +165,10 @@ jobs:
             ].join("\n");
             fs.writeFileSync("INDEX.md", md);
           '
+          # External witness: headline facts also land in the Actions run
+          # summary, which lives OUTSIDE the ledger branch — head truncation
+          # of the ledger must now also erase run history to go unnoticed.
+          { echo "## szl-quant ledger ${STAMP}"; grep -E '^(Track record|Hash chain|Paper book)' INDEX.md | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY" || true
           git add -A
           git commit -q -m "ledger: paper session ${STAMP} (run ${GITHUB_RUN_ID})"
           git push -q origin ledger
