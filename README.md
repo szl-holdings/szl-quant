@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 36 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book
+npm test                      # 41 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -71,6 +71,7 @@ node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → sign
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/  # walk the tamper-evident hash chain
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --book  ledger/  # REPLAY the stateful paper book
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/  # REPLAY the refusal census
 ```
 
 Feeds down? The engine emits an **honest empty** (`UNAVAILABLE`, zero
@@ -144,6 +145,26 @@ honest `null` equity instead of an invented mark. Paper only — the
 equity is MODELED over REPORTED marks, never real funds, never a
 performance claim.
 
+## Refusal record — why the engine says no
+
+```bash
+node bin/quant.mjs refusals --ledger ledger/  # → signed refusals_*.receipt.json
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/
+```
+
+Most of this engine's record is refusals — and that is by design, so the
+refusals themselves are first-class, signed data. Each run gets a census
+of every decision: verdict, proposed action, echoed conviction, and the
+exact gates that blocked it. The verifier replays the counts from the
+DSSE-verified decision receipts alone; a census that cannot be
+recomputed fails loudly.
+
+Honest reading of the current record: at ~120 daily observations the
+Hoeffding-shaped sample confidence stays low, which keeps Λ conviction
+under the 0.55 floor most days — so the conviction gate refuses. That is
+the doctrine working, not a defect, and it is **not** a promise that the
+engine will trade more (or better) as history accumulates.
+
 ## Verifiable track record — the anti-"calls account"
 
 ```bash
@@ -195,6 +216,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/track.mjs` | verifiable track record — scores VERIFIED signal receipts vs realized closes, full population, signed report |
 | `src/chain.mjs` | tamper-evident hash chain over ledger runs — signed links, genesis backfill, honest truncation limit |
 | `src/book.mjs` | stateful cross-run paper book — signed, prev-hash-linked, verifier-REPLAYABLE transitions (MODELED, paper-only) |
+| `src/refusals.mjs` | refusal record — signed per-run census of verdicts and blocking gates, verifier-replayable (MEASURED counts) |
 | `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |

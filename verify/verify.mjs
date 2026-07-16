@@ -394,11 +394,101 @@ function verifyBook(ledgerDir, pinnedKey) {
   return false;
 }
 
+// ---- refusal record (self-contained mirror of src/refusals.mjs rules) ----
+const REFUSALS_RE = /^refusals_\d+\.receipt\.json$/;
+
+function refusalsDecisionMirror(file, st) {
+  const dec = st?.predicate?.decision;
+  if (!dec?.asset?.symbol || !dec.proposedAction || !dec.verdict) return null;
+  return {
+    file,
+    symbol: dec.asset.symbol,
+    verdict: dec.verdict,
+    proposedAction: dec.proposedAction,
+    conviction: typeof dec.conviction === 'number' ? dec.conviction : null,
+    blockedBy: Array.isArray(dec.blockedBy) ? [...dec.blockedBy].sort() : [],
+  };
+}
+
+function refusalsCensusMirror(decisions, excludedFiles) {
+  const sorted = [...decisions].sort((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0));
+  const byAction = {};
+  const gateCounts = {};
+  let allowed = 0;
+  let blocked = 0;
+  for (const d of sorted) {
+    byAction[d.proposedAction] = (byAction[d.proposedAction] ?? 0) + 1;
+    if (d.verdict === 'ALLOWED') allowed++;
+    else blocked++;
+    for (const g of d.blockedBy) gateCounts[g] = (gateCounts[g] ?? 0) + 1;
+  }
+  const refusalsByGate = Object.entries(gateCounts).sort(([a], [b]) => (a < b ? -1 : 1)).map(([gate, count]) => ({ gate, count }));
+  return {
+    inputs: { signalFiles: sorted.map((d) => d.file).sort(), excludedSignals: { count: excludedFiles.length, files: [...excludedFiles].sort() } },
+    decisions: sorted,
+    totals: { decisions: sorted.length, allowed, blocked, byAction, refusalsByGate },
+  };
+}
+
+function verifyRefusals(ledgerDir, pinnedKey) {
+  let dirs;
+  try {
+    dirs = readdirSync(ledgerDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch (e) { console.log(`REFUSALS FAIL: cannot read ${ledgerDir}: ${e.message}`); return false; }
+  const problems = [];
+  const recs = [];
+  for (const d of dirs) {
+    const names = readdirSync(join(ledgerDir, d), { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).sort();
+    const rfs = names.filter((n) => REFUSALS_RE.test(n));
+    if (rfs.length > 1) problems.push(`${d}: ${rfs.length} refusal records in one dir (ambiguous)`);
+    for (const rf of rfs) {
+      const full = join(ledgerDir, d, rf);
+      const r = verifyFile(full, pinnedKey);
+      if (!r.ok) problems.push(`${d}/${rf}: refusal record fails verification: ${r.fails.join('; ')}`);
+      let body = null;
+      try { body = JSON.parse(Buffer.from(JSON.parse(readFileSync(full, 'utf8')).payload, 'base64').toString('utf8'))?.predicate?.summary ?? null; } catch { /* handled below */ }
+      if (!body || body.kind !== 'szl-quant-refusals') { problems.push(`${d}/${rf}: unreadable refusal record body`); continue; }
+      if (body.runDir !== d) problems.push(`${d}/${rf}: body.runDir ${body.runDir} \u2260 actual dir ${d}`);
+      recs.push({ dir: d, file: rf, body });
+    }
+  }
+  if (recs.length === 0) { console.log('REFUSALS FAIL: no refusal records found under ' + ledgerDir); return false; }
+  // REPLAY each census from the signed decision receipts on disk.
+  for (const rec of recs) {
+    const sigNames = readdirSync(join(ledgerDir, rec.dir), { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).filter((n) => n.startsWith('signal_') && n.endsWith('.receipt.json')).sort();
+    const decisions = [];
+    const excludedFiles = [];
+    for (const n of sigNames) {
+      const r = verifyFile(join(ledgerDir, rec.dir, n), pinnedKey);
+      if (!r.ok) { excludedFiles.push(n); continue; }
+      let st = null;
+      try { st = JSON.parse(Buffer.from(JSON.parse(readFileSync(join(ledgerDir, rec.dir, n), 'utf8')).payload, 'base64').toString('utf8')); } catch { excludedFiles.push(n); continue; }
+      const dec = refusalsDecisionMirror(n, st);
+      if (dec) decisions.push(dec);
+    }
+    const expect = refusalsCensusMirror(decisions, excludedFiles);
+    if (canonicalize(rec.body.inputs ?? null) !== canonicalize(expect.inputs)) problems.push(`${rec.dir}: inputs do not match the verified signal receipts on disk`);
+    if (canonicalize(rec.body.decisions ?? null) !== canonicalize(expect.decisions)) problems.push(`${rec.dir}: decision census does not REPLAY from the signed receipts`);
+    if (canonicalize(rec.body.totals ?? null) !== canonicalize(expect.totals)) problems.push(`${rec.dir}: totals do not replay — refusal counts cannot be trusted`);
+  }
+  for (const p of problems) console.log(`      REFUSALS FAIL: ${p}`);
+  if (problems.length === 0) {
+    const h = recs[recs.length - 1].body;
+    const gates = [...(h.totals.refusalsByGate ?? [])].sort((a, b) => b.count - a.count).map((x) => `${x.gate}\u00d7${x.count}`).join(' ');
+    console.log(`REFUSALS OK  records=${recs.length}  latest ${h.runDir}: BLOCKED ${h.totals.blocked}/${h.totals.decisions}${gates ? `  by gate: ${gates}` : ''} [MEASURED]`);
+    console.log('      note: every count recomputed from DSSE-verified decision receipts alone — a refusal is a decision, not an absence');
+    return true;
+  }
+  console.log('REFUSALS BROKEN');
+  return false;
+}
+
 // ---- main ----
 const args = process.argv.slice(2);
 let pinnedKey = null;
 let chainDir = null;
 let bookDir = null;
+let refusalsDir = null;
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--pubkey') {
@@ -413,10 +503,12 @@ for (let i = 0; i < args.length; i++) {
     chainDir = args[++i];
   } else if (args[i] === '--book') {
     bookDir = args[++i];
+  } else if (args[i] === '--refusals') {
+    refusalsDir = args[++i];
   } else files.push(args[i]);
 }
-if (files.length === 0 && !chainDir && !bookDir) {
-  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] (--dir receipts/ | --chain ledger/ | --book ledger/ | receipt.json ...)');
+if (files.length === 0 && !chainDir && !bookDir && !refusalsDir) {
+  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] (--dir receipts/ | --chain ledger/ | --book ledger/ | --refusals ledger/ | receipt.json ...)');
   process.exit(2);
 }
 let allOk = true;
@@ -430,4 +522,5 @@ for (const f of files.sort()) {
 if (files.length > 0) console.log(allOk ? `\nAll ${files.length} receipt(s) verified.` : '\nVERIFICATION FAILED');
 if (chainDir) allOk = verifyChain(chainDir, pinnedKey) && allOk;
 if (bookDir) allOk = verifyBook(bookDir, pinnedKey) && allOk;
+if (refusalsDir) allOk = verifyRefusals(refusalsDir, pinnedKey) && allOk;
 process.exit(allOk ? 0 : 1);

@@ -393,6 +393,52 @@ test('book: decisionForBook extracts exactly the acted-on fields, null on shape 
   assert.equal(decisionForBook('f.json', { predicate: {} }), null);
 });
 
+// ── refusal record ──────────────────────────────────────────────────────────
+import { buildRefusalsBody, decisionForRefusals, REFUSALS_FILE_RE } from '../src/refusals.mjs';
+
+const RD = [
+  { file: 'b.json', symbol: 'BBB', verdict: 'BLOCKED', proposedAction: 'ENTER_LONG', conviction: 0.2, blockedBy: ['conviction', 'freshness'] },
+  { file: 'a.json', symbol: 'AAA', verdict: 'ALLOWED', proposedAction: 'HOLD', conviction: 0.6, blockedBy: [] },
+  { file: 'c.json', symbol: 'CCC', verdict: 'BLOCKED', proposedAction: 'ENTER_LONG', conviction: null, blockedBy: ['conviction'] },
+];
+
+test('refusals: census counts verdicts, actions and blocking gates', () => {
+  const b = buildRefusalsBody({ decisions: RD, runDir: 'r1', nowIso: 'T' });
+  assert.equal(b.totals.decisions, 3);
+  assert.equal(b.totals.allowed, 1);
+  assert.equal(b.totals.blocked, 2);
+  assert.deepEqual(b.totals.refusalsByGate, [{ gate: 'conviction', count: 2 }, { gate: 'freshness', count: 1 }]); // array — counts must never sit under a gate-named key
+  assert.deepEqual(b.totals.byAction, { ENTER_LONG: 2, HOLD: 1 });
+  assert.deepEqual(b.decisions.map((d) => d.symbol), ['AAA', 'BBB', 'CCC']); // sorted census
+  assert.equal(b.labels.counts, 'MEASURED');
+});
+
+test('refusals: deterministic — input order does not change canonical bytes', () => {
+  const a = buildRefusalsBody({ decisions: RD, runDir: 'r1', nowIso: 'T' });
+  const b = buildRefusalsBody({ decisions: [...RD].reverse(), runDir: 'r1', nowIso: 'T' });
+  assert.equal(canonicalize(a), canonicalize(b));
+});
+
+test('refusals: honest empty census when a run has no decisions', () => {
+  const b = buildRefusalsBody({ decisions: [], runDir: 'r1', nowIso: 'T', excludedSignals: { count: 1, files: ['bad.json'] } });
+  assert.deepEqual(b.totals, { decisions: 0, allowed: 0, blocked: 0, byAction: {}, refusalsByGate: [] });
+  assert.deepEqual(b.inputs.signalFiles, []);
+  assert.deepEqual(b.inputs.excludedSignals, { count: 1, files: ['bad.json'] }); // exclusions still confessed
+});
+
+test('refusals: extraction takes exactly the counted fields, null on shape miss', () => {
+  const st = { predicate: { decision: { asset: { symbol: 'SOL' }, proposedAction: 'ENTER_LONG', verdict: 'BLOCKED', blockedBy: ['freshness', 'conviction'] } } };
+  assert.deepEqual(decisionForRefusals('f.json', st), { file: 'f.json', symbol: 'SOL', verdict: 'BLOCKED', proposedAction: 'ENTER_LONG', conviction: null, blockedBy: ['conviction', 'freshness'] });
+  assert.equal(decisionForRefusals('f.json', { predicate: {} }), null);
+});
+
+test('refusals: file-name pattern is strict (no spoofing via lookalike names)', () => {
+  assert.ok(REFUSALS_FILE_RE.test('refusals_1784223547921.receipt.json'));
+  assert.ok(!REFUSALS_FILE_RE.test('refusals_.receipt.json'));
+  assert.ok(!REFUSALS_FILE_RE.test('xrefusals_1.receipt.json'));
+  assert.ok(!REFUSALS_FILE_RE.test('refusals_1.receipt.json.bak'));
+});
+
 test('chain: file-name pattern is strict (no spoofing via lookalike names)', () => {
   assert.ok(CHAIN_FILE_RE.test('chain_0001.receipt.json'));
   assert.ok(!CHAIN_FILE_RE.test('chain_1.receipt.json'));
