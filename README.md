@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 71 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency, RFC 3161 second witness
+npm test                      # 81 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency, RFC 3161 second witness, cross-witness gossip
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -210,11 +210,12 @@ that embeds the whole token; the verifier repeats every check offline.
 DigiCert is tried first, FreeTSA as fallback; both unreachable is a
 counted gap, backfilled on the next run.
 
+**Generation 5 — cross-witness gossip.** A second scheduled observer, [szl-quant-witness](https://github.com/szl-holdings/szl-quant-witness), watches the same ledger from its own vantage point: own repo, own ed25519 key (pinned at `keys/observer_pubkey.json`), own cron offset from the engine's. It re-verifies the head binding itself, verifies the engine-captured and live Rekor checkpoints under its own pin, replays the consistency proof offline BEFORE signing, and publishes signed observations. The engine fully re-verifies each observation offline (including recomputing the verdict — an observer cannot editorialize), archives them under `witness/gossip/`, accounts for them in signed gossip receipts, and the verifier sweeps every checkpoint both parties hold for split views. Same org, same operator — a second vantage point, not a second operator; every receipt says so.
+
 Limits, plainly: only witnessed links are protected, outage gaps and
 unproven consistency edges are counted in the open, and consistency is
 proven between the checkpoints THIS engine captured — one observer, not
-cross-witness gossip (the RFC 3161 second witness adds a disjoint trust
-root, not a second vantage point). An anchor proves the bytes existed no later than
+cross-witness gossip (the RFC 3161 second witness adds a disjoint trust root; the szl-quant-witness gossip observer adds a second vantage point and key — still one operator, stated plainly). An anchor proves the bytes existed no later than
 integratedTime; for backfilled links that is later than sealing, and
 each receipt says which it is.
 
@@ -272,6 +273,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/refusals.mjs` | refusal record — signed per-run census of verdicts and blocking gates, verifier-replayable (MEASURED counts) |
 | `src/witness.mjs` | external witness — chain links anchored in the Rekor public transparency log; SET, RFC 6962 Merkle inclusion **and** checkpoint-to-checkpoint consistency replayed offline against pinned keys (REPORTED) |
 | `src/tsa.mjs` + `keys/tsa/` | second witness — RFC 3161 trusted timestamps over head-anchor receipts, verified offline against pin-on-first-use anchors before signing (REPORTED) |
+| `src/gossip.mjs` + `keys/observer_pubkey.json` | cross-witness gossip — observations from the second scheduled observer (szl-quant-witness) fully re-verified offline under its pinned key: verdict recomputation, checkpoint re-verification, split-view sweep (REPORTED) |
 | `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |

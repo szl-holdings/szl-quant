@@ -257,3 +257,46 @@ authority yields a token that survives offline verification, the engine
 refuses to receipt it and the gap is counted in the open, retried next
 run. This adds a disjoint trust root, not a second vantage point; both
 witnesses are still read by this engine alone.
+
+### Cross-witness gossip (generation 5)
+
+Generations 1–4 close every gap a single observer can close: signed
+inclusion proofs, offline consistency replay, an RFC 3161 second trust
+root. What they cannot close alone is the vantage-point limit — Rekor
+could, in principle, show this engine one history and everyone else
+another (a split view), and a single observer would never notice.
+
+Generation 5 adds a second scheduled observer,
+[szl-quant-witness](https://github.com/szl-holdings/szl-quant-witness),
+with its own repository, its own ed25519 identity (pinned at
+`keys/observer_pubkey.json`), and a cron offset from the engine's. Every
+~6 hours it clones the public ledger branch, re-verifies the newest head
+binding with its own hands, verifies the engine-captured checkpoint note
+under its own Rekor pin, fetches Rekor's LIVE checkpoint as IT sees it,
+replays the RFC 6962 consistency proof offline, and only then signs a
+gossip observation embedding both checkpoints, the raw live note, and the
+proof hashes — so everything it claims is replayable offline by anyone.
+
+The engine's witness pass fetches new observations, fully re-verifies
+every claim offline (DSSE under the pinned observer key, both checkpoint
+notes, witness/chain byte cross-binding against THIS ledger, consistency
+replay, and verdict recomputation — an observer cannot sign PREFIX_OK
+over failing data), archives them verbatim under `witness/gossip/`, and
+accounts for them in an engine-signed gossip receipt; bad observations
+are loud rejections in that receipt, never silent drops or accepts. The
+independent verifier repeats all of it from nothing but the pins, then
+sweeps every checkpoint both parties hold: same shard and same tree size
+must mean the same root, or the verify fails with SPLIT VIEW.
+
+What this proves: the history this engine anchored is the history Rekor
+shows a second, independently scheduled process at different times — a
+split view aimed at this engine now has to fool two vantage points on two
+schedules, and any divergence becomes signed, archived evidence
+(SPLIT_VIEW, LOG_REGRESSED, divergent-history rejections) instead of an
+invisible possibility.
+
+What this does NOT prove, stated plainly: both repositories live in one
+GitHub org under one maintainer. Gossip narrows the vantage-point and
+process limits, not the operator limit — an operator controlling both
+keys could fabricate agreeing views. Receipts and observations carry this
+limit in their `limits` arrays.

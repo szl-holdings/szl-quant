@@ -706,7 +706,7 @@ test('consistency: same size demands identical roots — a split view fails', ()
   assert.throws(() => rfc6962VerifyConsistency({ firstSize: 9, secondSize: 9, firstRootHex: root, secondRootHex: root, proofHex: ['aa'.repeat(32)] }), /must be empty/);
 });
 
-test('consistency: body is deterministic, REPORTED-labeled, single-observer limit stated', () => {
+test('consistency: body is deterministic, REPORTED-labeled, observer limits stated plainly', () => {
   const args = {
     origin: 'rekor.sigstore.dev - 1193050959916656506',
     prev: { treeSize: 10, rootHash: 'aa'.repeat(32), receiptFile: 'witness_0001_1.receipt.json', receiptSha256: 'bb'.repeat(32) },
@@ -719,7 +719,7 @@ test('consistency: body is deterministic, REPORTED-labeled, single-observer limi
   assert.equal(canonicalize(a), canonicalize(b));
   assert.equal(a.kind, 'szl-quant-witness-consistency');
   assert.equal(a.labels.proof, 'REPORTED');
-  assert.ok(a.limits.some((l) => l.includes('a single observer, not cross-witness gossip')));
+  assert.ok(a.limits.some((l) => l.includes('second scheduled observer (szl-quant-witness), same operator')));
   assert.ok(CONSISTENCY_FILE_RE.test(consistencyFileName(10, 20, 123)));
 });
 

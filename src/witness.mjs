@@ -32,7 +32,8 @@
  *   Generation-3 consistency receipts additionally prove each captured
  *   checkpoint is a prefix of the next (RFC 6962 consistency proofs) —
  *   append-only growth across the whole observation window, replayed
- *   offline. Single observer: no cross-witness gossip is claimed.
+ *   offline. Since generation 5 a second scheduled observer (szl-quant-witness)
+ *   cross-checks these anchors from its own vantage point; same operator, stated.
  * - An anchor proves the head's bytes existed no later than
  *   integratedTime; for backfilled links that is later than sealing.
  */
@@ -360,7 +361,7 @@ export function buildConsistencyBody({ origin, prev, next, proofHashes, nowIso }
     },
     note: 'log consistency: the tree observed at the earlier checkpoint is proven a PREFIX of the tree at the later one — the log only appended between these two observations',
     limits: [
-      'proves append-only growth between checkpoints THIS engine captured — a single observer, not cross-witness gossip',
+      'proves append-only growth between checkpoints THIS engine captured — cross-checked since generation 5 by a second scheduled observer (szl-quant-witness), same operator, stated plainly',
       'meaningful only if both endpoint checkpoints verify against the pinned rekor key — the verifier enforces exactly that',
     ],
   };
