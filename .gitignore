@@ -4,3 +4,5 @@ node_modules/
 .DS_Store
 # public transparency-log key — explicitly NOT a private key; the pin the offline verifier needs
 !keys/rekor_pubkey.pem
+# pinned TSA anchors — public certificates, the offline verifier refuses to run without them
+!keys/tsa/*.pem
