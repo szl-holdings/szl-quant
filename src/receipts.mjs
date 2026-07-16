@@ -23,6 +23,7 @@ export const PREDICATE = Object.freeze({
   session: 'https://szl.holdings/quant/session/v1',
   track: 'https://szl.holdings/quant/track-record/v1',
   chain: 'https://szl.holdings/quant/chain/v1',
+  book: 'https://szl.holdings/quant/book/v1',
 });
 
 function sha256Hex(obj) {

@@ -24,6 +24,7 @@ import { ensureIdentity, loadPublicKeyFromSpkiBase64 } from '../src/keys.mjs';
 import { verifyEnvelope } from '../src/dsse.mjs';
 import { verifySignalEnvelopes, buildTrackRecord, HORIZONS_DAYS } from '../src/track.mjs';
 import { scanLedgerForChain, buildChainBody } from '../src/chain.mjs';
+import { scanLedgerForBook, buildBookBody, decisionForBook } from '../src/book.mjs';
 import { LABELS } from '../src/canon.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -290,12 +291,57 @@ async function cmdChain() {
   console.log(`chain: seq ${body.seq}${body.prev ? ` (prev ${body.prev.sha256.slice(0, 12)}…)` : ' (GENESIS — backfilled all prior runs)'} seals ${body.coverage.dirs} dir(s) / ${body.coverage.files} file(s) → ${file}`);
 }
 
+async function cmdBook() {
+  const ledgerDir = arg('ledger', join(ROOT, 'ledger'));
+  const destArg = arg('dest', null);
+  const keys = ensureIdentity(KEY_PRIV, KEY_PUB_JSON);
+  // Act only on receipts that verify against the PINNED identity.
+  const pinned = loadPublicKeyFromSpkiBase64(JSON.parse(readFileSync(KEY_PUB_JSON, 'utf8')).publicKeySpkiBase64);
+  const scan = scanLedgerForBook(ledgerDir, { readdirSync, readFileSync });
+  if (scan.dirs.length === 0) { console.log(`book: no run dirs under ${ledgerDir} — nothing to account`); return; }
+  const destDir = destArg ?? scan.dirs[scan.dirs.length - 1];
+  if (!scan.dirs.includes(destDir)) { console.error(`book: dest dir ${destDir} not found under ${ledgerDir}`); process.exit(1); }
+  if (scan.books.some((b) => b.runDir === destDir)) { console.log(`book: ${destDir} already has a book receipt — honest no-op`); return; }
+  if (scan.prevBook) {
+    // Fail closed: never extend a book whose previous state cannot be verified.
+    let v;
+    try { v = verifyEnvelope(JSON.parse(readFileSync(join(ledgerDir, scan.prevBook.runDir, scan.prevBook.file), 'utf8')), pinned); }
+    catch (e) { v = { ok: false, fails: [String(e?.message ?? e)] }; }
+    if (!v.ok) { console.error(`book: PREVIOUS book receipt fails verification — refusing to extend a tampered book (fail closed): ${(v.fails ?? []).join('; ')}`); process.exit(1); }
+  }
+  const names = readdirSync(join(ledgerDir, destDir)).filter((n) => n.startsWith('signal_') && n.endsWith('.receipt.json')).sort();
+  const entries = names.map((n) => {
+    try { return { file: n, envelope: JSON.parse(readFileSync(join(ledgerDir, destDir, n), 'utf8')) }; }
+    catch { return { file: n, envelope: null }; }
+  });
+  const { verified, excluded } = verifySignalEnvelopes(entries, pinned, { verifyEnvelope });
+  for (const x of excluded) console.log(`  EXCLUDED (unverifiable — will NOT move the book): ${x.file}`);
+  const decisions = verified.map(({ file, statement }) => decisionForBook(file, statement)).filter(Boolean);
+  const body = buildBookBody({
+    prevBook: scan.prevBook, decisions, runDir: destDir, nowIso: new Date().toISOString(),
+    allRunDirs: scan.dirs, excludedSignals: { count: excluded.length, files: excluded.map((x) => x.file).sort() },
+  });
+  const { envelope } = signReceipt({
+    predicateType: PREDICATE.book,
+    subjectName: `szl-quant/book/${String(body.seq).padStart(4, '0')}`,
+    subjectBody: body,
+    predicate: { summary: body },
+    privateKey: keys.privateKey, publicKey: keys.publicKey,
+  });
+  const file = join(ledgerDir, destDir, `book_${Date.now()}.receipt.json`);
+  writeFileSync(file, JSON.stringify(envelope, null, 2) + '\n');
+  for (const f of body.fills) console.log(`  FILL ${f.side} ${f.asset} notional=${f.notionalUsd} eff=${f.effectivePrice} [MODELED costs]`);
+  for (const n of body.noActions) console.log(`  ${n.asset}: ${n.action} — ${n.why}`);
+  console.log(`book: seq ${body.seq}${body.prev ? ` (prev ${body.prev.sha256.slice(0, 12)}…)` : ' (GENESIS — paper fund starts here)'} fills=${body.fills.length} cash=${body.mark.cashUsd} equity=${body.mark.equityUsd ?? 'UNAVAILABLE (honest empty)'} [MODELED] → ${file}`);
+}
+
 const cmd = process.argv[2];
 if (cmd === 'backtest') await cmdBacktest();
 else if (cmd === 'paper') await cmdPaper();
 else if (cmd === 'track') await cmdTrack();
 else if (cmd === 'chain') await cmdChain();
+else if (cmd === 'book') await cmdBook();
 else {
-  console.log('usage: node bin/quant.mjs <backtest|paper|track|chain> [--days N] [--out DIR] [--ledger DIR]');
+  console.log('usage: node bin/quant.mjs <backtest|paper|track|chain|book> [--days N] [--out DIR] [--ledger DIR] [--dest RUN_DIR]');
   process.exit(2);
 }

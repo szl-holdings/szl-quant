@@ -62,13 +62,15 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 29 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain
+npm test                      # 36 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
 
 # independent verification (imports nothing from src/):
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/  # walk the tamper-evident hash chain
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --book  ledger/  # REPLAY the stateful paper book
 ```
 
 Feeds down? The engine emits an **honest empty** (`UNAVAILABLE`, zero
@@ -117,7 +119,30 @@ node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/
 Rewriting or deleting ANY sealed run now breaks the chain at that link.
 Honest limit, stated plainly: wholesale deletion of the newest link(s)
 (head truncation) is not detectable by the chain alone — GitHub Actions
-run logs and the git history of INDEX.md act as external witnesses.
+run logs (each run's summary now carries the headline facts) and the git
+history of INDEX.md act as external witnesses.
+
+## Stateful paper book — a fund you can replay
+
+```bash
+node bin/quant.mjs book --ledger ledger/    # → signed book_*.receipt.json
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --book ledger/
+```
+
+From genesis onward, every scheduled run advances a cross-run **paper
+book**: entries at 10% of equity on `ALLOWED ENTER_LONG`, full exits on
+`ALLOWED EXIT_LONG`, MODELED bps costs, no leverage / pyramiding /
+shorting — and anything BLOCKED leaves the book untouched (the gates
+hold the book, fail closed).
+
+The differentiator: the verifier does not *check* the book, it
+**replays** it — every fill, state and mark is recomputed from the
+DSSE-verified signal receipts alone, and byte-exact agreement is
+required. Each receipt pins its predecessor by sha256, config is locked
+at genesis, gaps are declared in-band, unpriced positions yield an
+honest `null` equity instead of an invented mark. Paper only — the
+equity is MODELED over REPORTED marks, never real funds, never a
+performance claim.
 
 ## Verifiable track record — the anti-"calls account"
 
@@ -169,6 +194,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/backtest.mjs` | walk-forward MEASURED replays, full-population reporting |
 | `src/track.mjs` | verifiable track record — scores VERIFIED signal receipts vs realized closes, full population, signed report |
 | `src/chain.mjs` | tamper-evident hash chain over ledger runs — signed links, genesis backfill, honest truncation limit |
+| `src/book.mjs` | stateful cross-run paper book — signed, prev-hash-linked, verifier-REPLAYABLE transitions (MODELED, paper-only) |
 | `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |

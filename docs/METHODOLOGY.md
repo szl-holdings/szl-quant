@@ -121,3 +121,33 @@ deleting any sealed run breaks the walk loudly. Honest limit, stated
 in every link: wholesale deletion of the newest link(s) (head
 truncation) is not detectable by the chain alone; GitHub Actions run
 logs and the git history of INDEX.md act as external witnesses.
+
+## Stateful paper book (MODELED)
+
+From book seq 1 onward, every scheduled run advances a cross-run paper
+book: a signed `book_*.receipt.json` whose state transition is exactly
+replayable from the DSSE-verified signal receipts in the same run dir.
+`verify --book ledger/` reimplements the frozen v1 rules independently
+and recomputes every fill, state and mark; byte-exact agreement is
+required, so a book that cannot be replayed fails loudly.
+
+Frozen v1 rules:
+- Only decisions from receipts that verify against the pinned engine key
+  move the book; unverifiable files are excluded and listed in-band.
+- `ALLOWED ENTER_LONG` buys `entryFractionBps` (10%) of current equity at
+  the decision-time REPORTED price with MODELED fee+slippage bps; no
+  leverage, no pyramiding, no shorting. `ALLOWED EXIT_LONG` sells the
+  full position. Anything BLOCKED leaves the book untouched — the gates
+  hold the book (fail closed).
+- Missing price ⇒ no fill; if an open position is unpriced, equity is
+  `null` with a note — an honest empty, never an invented mark.
+- Config (starting cash, sizing, cost model) is pinned at genesis and
+  inherited unchanged; the verifier fails any mid-stream drift.
+- Each receipt pins its predecessor by sha256 of the exact bytes; gaps
+  (pre-book history, skipped runs) are declared in-band and checked
+  against the ledger's actual directory list.
+
+What the book does NOT claim: no depth/latency/partial-fill realism, no
+real funds, no performance promise. Equity is MODELED over REPORTED
+marks. Starting capital (10,000 paper USD) is a declared simulation
+constant, not money.
