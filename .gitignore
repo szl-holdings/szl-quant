@@ -2,3 +2,5 @@ node_modules/
 .local-keys/
 *.pem
 .DS_Store
+# public transparency-log key — explicitly NOT a private key; the pin the offline verifier needs
+!keys/rekor_pubkey.pem
