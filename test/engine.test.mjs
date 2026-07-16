@@ -735,3 +735,91 @@ test('consistency: targets pair adjacent unique sizes per origin and respect cov
   assert.deepEqual(t3.map((t) => [t.prev.treeSize, t.next.treeSize]), [[5, 8]]);
   assert.deepEqual(consistencyTargets({ checkpoints: [cp('o1', 5, 'a'), cp('o2', 8, 'b')], covered: [] }), []);
 });
+
+// ── frontier 9: RFC 3161 second witness (trusted timestamps) ────────────────
+const tsa9 = await import('../src/tsa.mjs');
+const { readFileSync: tsa9read } = await import('node:fs');
+const { canonicalBytes: tsa9canon } = await import('../src/canonical-json.mjs');
+const tsa9fix = new URL('./fixtures/tsa/', import.meta.url);
+const tsa9meta = JSON.parse(tsa9read(new URL('probe.meta.json', tsa9fix), 'utf8'));
+const tsa9tok = (n) => tsa9read(new URL(`token_${n}.der`, tsa9fix));
+const tsa9pins = { digicert: tsa9read(new URL('../../../keys/tsa/digicert_anchor.pem', tsa9fix), 'utf8'), freetsa: tsa9read(new URL('../../../keys/tsa/freetsa_anchor.pem', tsa9fix), 'utf8') };
+
+test('tsa: request builder emits DER with the imprint and a nonce', () => {
+  const nonce = Buffer.from('40a1b2c3d4e5f607', 'hex');
+  const req = tsa9.buildTimestampRequest(tsa9meta.hash, nonce);
+  assert.equal(req[0], 0x30); // SEQUENCE
+  assert.ok(req.includes(Buffer.from(tsa9meta.hash, 'hex')), 'imprint embedded');
+  assert.ok(req.includes(nonce), 'nonce embedded');
+});
+
+test('tsa: response parser extracts the exact granted token (throws on rejection)', () => {
+  const { tokenDer } = tsa9.parseTimestampResponse(tsa9read(new URL('resp_digicert.tsr', tsa9fix)));
+  assert.ok(Buffer.compare(tokenDer, tsa9tok('digicert')) === 0, 'token bytes match the extracted fixture');
+});
+
+test('tsa: DigiCert fixture token verifies offline against the pinned anchor (RSA path)', () => {
+  const v = tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert], expectedNonceHex: tsa9meta.nonce });
+  assert.equal(v.genTime, '2026-07-16T19:54:03.000Z');
+  assert.equal(v.chainLength, 3);
+});
+
+test('tsa: FreeTSA fixture token verifies offline (ECDSA-SHA512 path)', () => {
+  const v = tsa9.verifyTimestampToken({ tokenDer: tsa9tok('freetsa'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.freetsa], expectedNonceHex: tsa9meta.nonce });
+  assert.equal(v.chainLength, 2);
+});
+
+test('tsa: wrong imprint is rejected', () => {
+  assert.throws(() => tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: 'ab'.repeat(32), anchors: [tsa9pins.digicert] }), /imprint/i);
+});
+
+test('tsa: token cannot chain to a swapped (wrong-authority) pin', () => {
+  assert.throws(() => tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.freetsa] }));
+});
+
+test('tsa: a flipped byte in the signature region is rejected', () => {
+  const t = Buffer.from(tsa9tok('digicert'));
+  t[t.length - 25] ^= 0xff;
+  assert.throws(() => tsa9.verifyTimestampToken({ tokenDer: t, expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert] }));
+});
+
+test('tsa: a flipped byte early in the token (TSTInfo region) is rejected', () => {
+  const t = Buffer.from(tsa9tok('freetsa'));
+  t[120] ^= 0x01;
+  assert.throws(() => tsa9.verifyTimestampToken({ tokenDer: t, expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.freetsa] }));
+});
+
+test('tsa: nonce echo compares by INTEGER VALUE, not raw hex bytes', () => {
+  const padded = '00' + tsa9meta.nonce;
+  const v = tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert], expectedNonceHex: padded });
+  assert.ok(v.genTime, 'redundant leading zero must not fail the echo check');
+  assert.throws(() => tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert], expectedNonceHex: 'deadbeef00112233' }), /nonce/i);
+});
+
+test('tsa: truncated token DER throws instead of passing', () => {
+  assert.throws(() => tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert').subarray(0, 60), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert] }));
+});
+
+test('tsa: receipt body is canonicalizable, honestly labeled, and states its limits', () => {
+  const verified = tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert] });
+  const mk = (backfilled) => tsa9.buildTsaBody({
+    seq: 3, witnessFile: 'witness_0003_1.receipt.json', witnessSha256: tsa9meta.hash,
+    authority: { name: 'DigiCert', url: 'http://timestamp.digicert.com' }, verified,
+    tokenDerBase64: tsa9tok('digicert').toString('base64'), nonceHex: tsa9meta.nonce,
+    backfilled, capturedAt: '2026-07-16T20:30:00.000Z',
+  });
+  const a = mk(false); const b = mk(true);
+  assert.doesNotThrow(() => tsa9canon(a));
+  assert.equal(a.kind, 'szl-quant-witness-tsa');
+  assert.equal(a.label, 'REPORTED');
+  assert.match(a.limits, /pin-on-first-use/);
+  assert.match(b.limits, /Backfilled/);
+  assert.notEqual(a.limits, b.limits);
+});
+
+test('tsa: file naming roundtrips and does not collide with witness receipts', () => {
+  const n = tsa9.tsaFileName(7, 1784232000000);
+  assert.match(n, tsa9.TSA_FILE_RE);
+  assert.equal(Number(tsa9.TSA_FILE_RE.exec(n)[1]), 7);
+  assert.equal(tsa9.TSA_FILE_RE.test('witness_0007_1784232000000.receipt.json'), false);
+});

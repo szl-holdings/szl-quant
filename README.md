@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 59 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency
+npm test                      # 71 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency, RFC 3161 second witness
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -72,7 +72,7 @@ node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/  # walk the tamper-evident hash chain
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --book  ledger/  # REPLAY the stateful paper book
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/  # REPLAY the refusal census
-node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .         # check Rekor anchors OFFLINE (from the ledger-branch root)
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .         # check Rekor anchors + TSA countersignatures OFFLINE (from the ledger-branch root)
 ```
 
 Feeds down? The engine emits an **honest empty** (`UNAVAILABLE`, zero
@@ -171,7 +171,7 @@ engine will trade more (or better) as history accumulates.
 ```bash
 node bin/quant.mjs witness --ledger ledger/ --witness-dir witness/        # anchor the newest head + link checkpoints
 node bin/quant.mjs witness --ledger ledger/ --witness-dir witness/ --all  # backfill: every link anchored, every checkpoint pair linked
-node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .       # replay anchors + inclusion + consistency offline
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .       # replay anchors + inclusion + consistency + second-witness timestamps offline
 ```
 
 The hash chain confesses its one blind spot: deleting the newest link(s)
@@ -200,10 +200,21 @@ signing and again at verify time; a forked or rewritten log cannot
 produce one, and two signed checkpoints at the same tree size with
 different roots would be split-view evidence, flagged as exactly that.
 
+A **second witness** (generation 4) narrows the single-observer limit:
+each head-anchor witness receipt is countersigned by an RFC 3161
+timestamp authority — a trust root entirely outside Sigstore. The engine
+builds the TimeStampReq itself, and verifies the returned token offline
+(signature, signing-cert EKU, chain to a pinned anchor committed in
+`keys/tsa/`, imprint, nonce echo) **before** signing a REPORTED receipt
+that embeds the whole token; the verifier repeats every check offline.
+DigiCert is tried first, FreeTSA as fallback; both unreachable is a
+counted gap, backfilled on the next run.
+
 Limits, plainly: only witnessed links are protected, outage gaps and
 unproven consistency edges are counted in the open, and consistency is
 proven between the checkpoints THIS engine captured — one observer, not
-cross-witness gossip. An anchor proves the bytes existed no later than
+cross-witness gossip (the RFC 3161 second witness adds a disjoint trust
+root, not a second vantage point). An anchor proves the bytes existed no later than
 integratedTime; for backfilled links that is later than sealing, and
 each receipt says which it is.
 
@@ -260,6 +271,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/book.mjs` | stateful cross-run paper book — signed, prev-hash-linked, verifier-REPLAYABLE transitions (MODELED, paper-only) |
 | `src/refusals.mjs` | refusal record — signed per-run census of verdicts and blocking gates, verifier-replayable (MEASURED counts) |
 | `src/witness.mjs` | external witness — chain links anchored in the Rekor public transparency log; SET, RFC 6962 Merkle inclusion **and** checkpoint-to-checkpoint consistency replayed offline against pinned keys (REPORTED) |
+| `src/tsa.mjs` + `keys/tsa/` | second witness — RFC 3161 trusted timestamps over head-anchor receipts, verified offline against pin-on-first-use anchors before signing (REPORTED) |
 | `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |

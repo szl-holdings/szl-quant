@@ -25,7 +25,14 @@ import { verifyEnvelope } from '../src/dsse.mjs';
 import { verifySignalEnvelopes, buildTrackRecord, HORIZONS_DAYS } from '../src/track.mjs';
 import { buildRefusalsBody, decisionForRefusals, REFUSALS_FILE_RE } from '../src/refusals.mjs';
 import { buildRekordProposal, buildWitnessBody, witnessFileName, witnessTargets, WITNESS_FILE_RE, REKOR_SERVER, buildConsistencyBody, consistencyTargets, consistencyFileName, rfc6962VerifyConsistency, parseCheckpoint, CONSISTENCY_FILE_RE } from '../src/witness.mjs';
-import { sign as rawEdSign, createHash } from 'node:crypto';
+import { sign as rawEdSign, createHash, randomBytes } from 'node:crypto';
+import { buildTimestampRequest, parseTimestampResponse, verifyTimestampToken, tsaFileName, TSA_FILE_RE, buildTsaBody } from '../src/tsa.mjs';
+
+const TSA_AUTHORITIES = [
+  { name: 'DigiCert', url: 'http://timestamp.digicert.com', anchor: 'digicert_anchor.pem' },
+  { name: 'FreeTSA', url: 'https://freetsa.org/tsr', anchor: 'freetsa_anchor.pem' },
+];
+const TSA_ANCHOR_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'keys', 'tsa');
 import { mkdirSync as ensureDirSync } from 'node:fs';
 import { scanLedgerForChain, buildChainBody } from '../src/chain.mjs';
 import { scanLedgerForBook, buildBookBody, decisionForBook } from '../src/book.mjs';
@@ -418,6 +425,7 @@ async function cmdWitness() {
     }
   }
   await consistencyPass({ witnessDir, keys });
+  await tsaPass({ witnessDir, keys, all: all });
 }
 
 /** Generation 3: link every adjacent pair of captured checkpoints with an
@@ -587,4 +595,87 @@ else if (cmd === 'witness') await cmdWitness();
 else {
   console.log('usage: node bin/quant.mjs <backtest|paper|track|chain|book|refusals|witness> [--days N] [--out DIR] [--ledger DIR] [--dest RUN_DIR] [--witness-dir DIR]');
   process.exit(2);
+}
+
+// ── SECOND WITNESS: RFC 3161 trusted timestamps (frontier 9) ───────────────
+// An independent authority with a DIFFERENT root of trust than Rekor
+// countersigns the sha256 of each head-anchor witness receipt. Every token
+// is verified OFFLINE against the pinned anchors in keys/tsa/ BEFORE the
+// engine signs a receipt over it. Authority down = honest counted gap.
+
+async function tsaPass({ witnessDir, keys, all = false }) {
+  const bySeq = new Map(); // seq -> newest witness receipt file
+  for (const f of readdirSync(witnessDir).sort()) {
+    if (!WITNESS_FILE_RE.test(f)) continue;
+    bySeq.set(Number(/^witness_(\d{4})_/.exec(f)[1]), f); // RE above has no capture groups
+  }
+  if (!bySeq.size) return;
+  const covered = new Set();
+  for (const f of readdirSync(witnessDir)) {
+    const m = TSA_FILE_RE.exec(f);
+    if (m) covered.add(Number(m[1]));
+  }
+  const maxSeq = Math.max(...bySeq.keys());
+  let targets = [...bySeq.entries()].filter(([seq]) => !covered.has(seq)).map(([seq, f]) => ({ seq, f }));
+  if (!all) targets = targets.filter((t) => t.seq === maxSeq);
+  if (!targets.length) {
+    console.log('witness: every head anchor already carries a second-witness timestamp — honest no-op');
+    return;
+  }
+  let ok = 0;
+  for (const t of targets) {
+    if (await stampOneHead({ t, witnessDir, keys, backfilled: t.seq !== maxSeq })) ok += 1;
+    await sleep(400); // polite pacing to public authorities
+  }
+  console.log(`witness: second-witness timestamps ${ok}/${targets.length} head anchor(s)${ok === targets.length ? ' — every targeted head is countersigned by an independent authority' : ' — missing tokens are honest gaps, retried next run'}`);
+}
+
+async function stampOneHead({ t, witnessDir, keys, backfilled }) {
+  const bytes = readFileSync(join(witnessDir, t.f));
+  const imprint = createHash('sha256').update(bytes).digest('hex');
+  const nonce = randomBytes(8);
+  nonce[0] = (nonce[0] & 0x3f) | 0x40; // 0x40..0x7f: positive, minimal DER, nonzero high nibble — byte-stable echo
+  for (const a of TSA_AUTHORITIES) {
+    let anchorPem;
+    try { anchorPem = readFileSync(join(TSA_ANCHOR_DIR, a.anchor), 'utf8'); }
+    catch { console.log(`witness UNAVAILABLE (tsa seq ${t.seq}) — no pinned anchor for ${a.name} in keys/tsa/ — refusing to trust an unpinned authority`); continue; }
+    let tokenDer;
+    try {
+      const res = await fetch(a.url, {
+        method: 'POST', headers: { 'Content-Type': 'application/timestamp-query' },
+        body: buildTimestampRequest(imprint, nonce), signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) { console.log(`witness UNAVAILABLE (tsa seq ${t.seq}) — ${a.name} HTTP ${res.status}`); continue; }
+      ({ tokenDer } = parseTimestampResponse(Buffer.from(await res.arrayBuffer())));
+    } catch (e) {
+      console.log(`witness UNAVAILABLE (tsa seq ${t.seq}) — ${a.name} unreachable/refused (${e.message})`);
+      continue;
+    }
+    let verified;
+    try {
+      verified = verifyTimestampToken({ tokenDer, expectedImprintHex: imprint, anchors: [anchorPem], expectedNonceHex: nonce.toString('hex'), now: new Date() });
+    } catch (e) {
+      console.log(`witness UNAVAILABLE (tsa seq ${t.seq}) — ${a.name} token FAILED offline verification (${e.message}) — refusing to receipt an unverifiable token`);
+      continue;
+    }
+    const body = buildTsaBody({
+      seq: t.seq, witnessFile: t.f, witnessSha256: imprint,
+      authority: { name: a.name, url: a.url }, verified,
+      tokenDerBase64: tokenDer.toString('base64'), nonceHex: nonce.toString('hex'),
+      backfilled, capturedAt: new Date().toISOString(),
+    });
+    const { envelope } = signReceipt({
+      predicateType: PREDICATE.witness,
+      subjectName: `szl-quant/witness/tsa-${t.seq}`,
+      subjectBody: body,
+      predicate: { summary: body },
+      privateKey: keys.privateKey, publicKey: keys.publicKey,
+    });
+    const file = join(witnessDir, tsaFileName(t.seq, Date.now()));
+    writeFileSync(file, JSON.stringify(envelope, null, 2) + '\n');
+    console.log(`witness: SECOND WITNESS ${a.name} timestamped seq ${t.seq} genTime=${verified.genTime} (token verified offline against the pinned anchor before signing) [REPORTED] → ${file}`);
+    return true;
+  }
+  console.log(`witness UNAVAILABLE (tsa seq ${t.seq}) — no authority produced a verifiable token — honest gap, retried next run`);
+  return false;
 }

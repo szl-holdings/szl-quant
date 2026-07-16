@@ -91,7 +91,7 @@ jobs:
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --book ledger
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --refusals ledger
           if ls witness/witness_*.receipt.json >/dev/null 2>&1; then
-            node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --rekor-pubkey "$GITHUB_WORKSPACE/keys/rekor_pubkey.pem" --witness .
+            node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --rekor-pubkey "$GITHUB_WORKSPACE/keys/rekor_pubkey.pem" --tsa-anchors "$GITHUB_WORKSPACE/keys/tsa" --witness .
           else
             echo "witness: no anchors yet (rekor unreachable so far) — an honest gap, stated in the open"
           fi
@@ -155,6 +155,7 @@ jobs:
               if (wf.length) {
                 const wbodies = wf.map(f => JSON.parse(Buffer.from(JSON.parse(fs.readFileSync("witness/"+f,"utf8")).payload,"base64").toString()).predicate.summary);
                 const consFiles = fs.readdirSync("witness").filter(f => /^consistency_\d+-\d+_\d+\.receipt\.json$/.test(f));
+                const tsaFiles = fs.readdirSync("witness").filter(f => /^tsa_\d{4}_\d+\.receipt\.json$/.test(f));
                 const cpSizes = new Set(wbodies.filter(b => b.rekor && b.rekor.inclusionProof).map(b => b.rekor.inclusionProof.treeSize));
                 const consEdges = Math.max(0, cpSizes.size - 1);
                 wbodies.sort((a,b) => a.chain.seq - b.chain.seq);
@@ -163,7 +164,7 @@ jobs:
                 for (const d of dirs) for (const f of fs.readdirSync("ledger/"+d)) if (/^chain_\d{4}\.receipt\.json$/.test(f)) links++;
                 const seqs = new Set(wbodies.map(b => b.chain.seq));
                 const proven = new Set(wbodies.filter(b => b.rekor && b.rekor.inclusionProof).map(b => b.chain.seq));
-                witnessLine = `External witness (REPORTED, SET + Merkle inclusion + log consistency offline-verifiable): chain head seq ${wh.chain.seq} anchored in Rekor — logIndex ${wh.rekor.logIndex}, uuid ${String(wh.rekor.uuid).slice(0,16)}… · heads anchored ${seqs.size}/${links} · inclusion proven offline ${proven.size}/${links} · log consistency ${consFiles.length}/${consEdges} adjacent checkpoint pair(s) receipted · an anchored head cannot be silently truncated · check: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .\``;
+                witnessLine = `External witness (REPORTED, SET + Merkle inclusion + log consistency offline-verifiable): chain head seq ${wh.chain.seq} anchored in Rekor — logIndex ${wh.rekor.logIndex}, uuid ${String(wh.rekor.uuid).slice(0,16)}… · heads anchored ${seqs.size}/${links} · inclusion proven offline ${proven.size}/${links} · log consistency ${consFiles.length}/${consEdges} adjacent checkpoint pair(s) receipted · second witness (RFC 3161) ${tsaFiles.length}/${links} head(s) countersigned · an anchored head cannot be silently truncated · check: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .\``;
               }
             } catch {}
             // Hash-chain headline from the newest chain receipt (fail-soft).
