@@ -9,15 +9,17 @@ Verify any entry independently:
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir ledger/<run-dir>/
 ```
 
-Runs recorded: 10 · receipts: 86 (MEASURED from files present; cron is best-effort, gaps are honest)
+Runs recorded: 11 · receipts: 97 (MEASURED from files present; cron is best-effort, gaps are honest)
 
-Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=39 — a past frequency, NOT a prediction
+Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=43 — a past frequency, NOT a prediction
 
-Hash chain: 8 link(s), head seq 8 sha256 bf6cdb176cf0… — every sealed run tamper-evident; walk it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/`
+Hash chain: 9 link(s), head seq 9 sha256 8eed6030faa1… — every sealed run tamper-evident; walk it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/`
 
-Paper book (MODELED, paper-only — NOT real funds): seq 2 · equity $10000.000000 · open positions 0 · fills this run 0 · replay it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --book ledger/`
+Paper book (MODELED, paper-only — NOT real funds): seq 3 · equity $10000.000000 · open positions 0 · fills this run 0 · replay it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --book ledger/`
 
-Refusal record (MEASURED): latest run BLOCKED 4/6 — conviction×2 liquidity×2 · lifetime (recorded runs) 4/6 — conviction×2 liquidity×2 · a refusal is a decision, not an absence · replay: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/`
+Refusal record (MEASURED): latest run BLOCKED 4/6 — conviction×2 liquidity×2 · lifetime (recorded runs) 8/12 — conviction×4 liquidity×4 · a refusal is a decision, not an absence · replay: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/`
+
+External witness (REPORTED, SET offline-verifiable): chain head seq 9 anchored in Rekor — logIndex 2187135304, uuid 108e9186e8c5677a… · heads anchored 1/9 · an anchored head cannot be silently truncated · check: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .`
 
 | run (UTC) | receipts |
 |---|---|
@@ -31,5 +33,6 @@ Refusal record (MEASURED): latest run BLOCKED 4/6 — conviction×2 liquidity×2
 | 20260716T142836Z_run8 | 9 |
 | 20260716T173736Z_run9 | 10 |
 | 20260716T175421Z_run10 | 11 |
+| 20260716T183506Z_run12 | 11 |
 
 _Advisory research output. NOT financial advice. No execution, no custody._
