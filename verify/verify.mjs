@@ -718,8 +718,8 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
     const setOnlyNote = setOnly > 0 ? ` (${setOnly} SET-only receipt(s) — each states that limit itself)` : '';
     console.log(`WITNESS OK  anchors=${names.length}  heads anchored=${anchoredSeqs.size}/${linkSeqs.size} chain links  inclusion proven offline=${provenSeqs.size}/${linkSeqs.size}${setOnlyNote}  log consistency=${consProven}/${consEdges} adjacent checkpoint pair(s)  latest: seq ${latest.chain.seq} \u2192 rekor logIndex ${latest.rekor.logIndex} (integrated ${t}) [REPORTED, SET verified offline${provenSeqs.size > 0 ? ' + Merkle inclusion replayed offline' : ''}${consProven > 0 && consProven === consEdges ? ' + log consistency replayed offline' : ''}]`);
     console.log('      note: anchored heads live in a public append-only log — deleting this ledger does not delete the anchors; unwitnessed links are counted above, not hidden');
-    if (consEdges > 0 && consProven === consEdges) console.log("      note: consistency replayed offline across every captured checkpoint — the log is proven append-only for this engine's whole observation window (single observer; no cross-witness gossip)");
-    else if (consEdges > 0) console.log(`      note: consistency proven for ${consProven}/${consEdges} adjacent checkpoint pair(s) — unproven edges are counted, not hidden (single observer; no cross-witness gossip)`);
+    if (consEdges > 0 && consProven === consEdges) console.log("      note: consistency replayed offline across every captured checkpoint — the log is proven append-only for this engine's whole observation window (second-observer gossip cross-checks below)");
+    else if (consEdges > 0) console.log(`      note: consistency proven for ${consProven}/${consEdges} adjacent checkpoint pair(s) — unproven edges are counted, not hidden (second-observer gossip cross-checks below)`);
     else if (provenSeqs.size > 0) console.log('      note: inclusion is proven against the checkpoint captured at anchor time — checkpoint-to-checkpoint consistency is not verified offline');
     return true;
   }
@@ -1065,6 +1065,129 @@ function verifyTsa(rootDir, pinnedKey, anchorsDir) {
 }
 
 // ---- main ----
+
+// ---- generation 5: cross-witness gossip (self-contained mirror) ----------
+const OBS_RE = /^obs_(\d{4})_\d+\.observation\.json$/;
+const GOSSIP_RE = /^gossip_(\d{4})_(\d+)\.receipt\.json$/;
+const GOSSIP_PREDICATE_M = 'https://szl.holdings/quant/gossip-observation/v1';
+
+/** Parse checkpoint note fields WITHOUT a signature check — used only for
+ *  engine witness receipts whose notes verifyWitness already verified. */
+function noteFieldsMirror(text) {
+  const sep = text.indexOf('\n\n');
+  const bodyLines = text.slice(0, sep + 1).split('\n');
+  return { origin: bodyLines[0], treeSize: Number(bodyLines[1]), rootHashHex: Buffer.from(bodyLines[2], 'base64').toString('hex') };
+}
+
+function verifyGossip(rootDir, pinnedKey, rekorPubPath2, observerPubPath2) {
+  const wDir = join(rootDir, 'witness');
+  const gDir = join(wDir, 'gossip');
+  let obsNames = [];
+  try { obsNames = readdirSync(gDir).filter((n) => OBS_RE.test(n)).sort(); } catch { /* no gossip dir yet */ }
+  let receiptNames = [];
+  try { receiptNames = readdirSync(wDir).filter((n) => GOSSIP_RE.test(n)).sort(); } catch { /* no witness dir */ }
+  if (!obsNames.length && !receiptNames.length) {
+    console.log('\nGOSSIP  none — no second-observer observations archived yet (absence is honest)');
+    return true;
+  }
+  const fails = [];
+  let observerPub = null; let observerKeyId = null; let rekorPub = null;
+  try {
+    const pin = JSON.parse(readFileSync(observerPubPath2, 'utf8'));
+    observerPub = createPublicKey({ key: Buffer.from(pin.publicKeySpkiBase64, 'base64'), type: 'spki', format: 'der' });
+    observerKeyId = pin.keyId;
+    if (sha256Hex(observerPub.export({ type: 'spki', format: 'der' })).slice(0, 16) !== pin.keyId) fails.push('observer pin keyId does not match its own key material');
+  } catch (e) { fails.push(`cannot load observer pin ${observerPubPath2}: ${e.message} (refusing TOFU on a second-party key)`); }
+  try { rekorPub = createPublicKey(readFileSync(rekorPubPath2, 'utf8')); } catch (e) { fails.push(`cannot load rekor pin ${rekorPubPath2}: ${e.message}`); }
+  const liveCps = [];
+  const censusActual = {};
+  if (observerPub && rekorPub) {
+    for (const n of obsNames) {
+      try {
+        const env = JSON.parse(readFileSync(join(gDir, n), 'utf8'));
+        if (env.payloadType !== 'application/vnd.in-toto+json') { fails.push(`${n}: payloadType ${env.payloadType}`); continue; }
+        const payloadBytes = Buffer.from(env.payload, 'base64');
+        const sigEntry = (env.signatures ?? []).find((x) => x.keyid === observerKeyId);
+        if (!sigEntry || !edVerify(null, pae(env.payloadType, payloadBytes), observerPub, Buffer.from(sigEntry.sig, 'base64'))) { fails.push(`${n}: observer ed25519 signature INVALID`); continue; }
+        const st = JSON.parse(payloadBytes.toString('utf8'));
+        const s = st.predicate?.summary;
+        if (st.predicateType !== GOSSIP_PREDICATE_M || s?.kind !== 'szl-quant-gossip-observation') { fails.push(`${n}: wrong predicateType/kind`); continue; }
+        if (s.label !== 'REPORTED') { fails.push(`${n}: label ${s.label} — observations must be REPORTED`); continue; }
+        if (!Array.isArray(s.limits) || !s.limits.length) { fails.push(`${n}: states no limits — canon requires honesty about limits`); continue; }
+        if (s.observer?.keyId !== observerKeyId || s.observer?.repo !== 'szl-holdings/szl-quant-witness') { fails.push(`${n}: observer identity mismatch`); continue; }
+        if (st.subject?.[0]?.digest?.sha256 !== s.ledger?.witnessSha256) { fails.push(`${n}: subject does not bind the observed witness receipt`); continue; }
+        let wBytes = null;
+        try { wBytes = readFileSync(join(wDir, s.ledger.witnessFile)); } catch { fails.push(`${n}: observed witness receipt ${s.ledger.witnessFile} absent from this ledger`); continue; }
+        if (sha256Hex(wBytes) !== s.ledger.witnessSha256) { fails.push(`${n}: witness receipt bytes DIFFER from what the observer saw — divergent-history evidence`); continue; }
+        let chainSha = null;
+        try { chainSha = sha256Hex(readFileSync(join(rootDir, 'ledger', s.ledger.chainRunDir, s.ledger.chainFile))); } catch { fails.push(`${n}: chain link ${s.ledger.chainFile} absent from this ledger`); continue; }
+        if (chainSha !== s.ledger.chainSha256) { fails.push(`${n}: chain link bytes DIFFER from what the observer saw — divergent-history evidence`); continue; }
+        const wSt = JSON.parse(Buffer.from(JSON.parse(wBytes.toString('utf8')).payload, 'base64').toString('utf8'));
+        const eNote = wSt.predicate?.summary?.rekor?.inclusionProof?.checkpoint;
+        if (!eNote) { fails.push(`${n}: local witness receipt carries no checkpoint`); continue; }
+        const eCp = noteFieldsMirror(eNote);
+        if (s.engineCheckpoint?.origin !== eCp.origin || s.engineCheckpoint?.treeSize !== eCp.treeSize || s.engineCheckpoint?.rootHex !== eCp.rootHashHex) { fails.push(`${n}: engineCheckpoint does not match the checkpoint inside the named witness receipt`); continue; }
+        const lv = checkpointMirror(String(s.liveCheckpoint?.rawNote ?? ''), rekorPub);
+        if (!lv.ok) { fails.push(`${n}: live checkpoint note failed offline verification (${lv.reason})`); continue; }
+        if (lv.origin !== s.liveCheckpoint.origin || lv.treeSize !== s.liveCheckpoint.treeSize || lv.rootHashHex !== s.liveCheckpoint.rootHex) { fails.push(`${n}: liveCheckpoint fields do not match the embedded signed note`); continue; }
+        let expected;
+        if (eCp.origin !== lv.origin) expected = 'SHARD_ROTATED';
+        else if (lv.treeSize < eCp.treeSize) expected = 'LOG_REGRESSED';
+        else if (lv.treeSize === eCp.treeSize) expected = lv.rootHashHex === eCp.rootHashHex ? 'ROOTS_EQUAL' : 'SPLIT_VIEW';
+        else {
+          try { rfcConsistencyMirror(eCp.treeSize, lv.treeSize, eCp.rootHashHex, lv.rootHashHex, s.consistency?.proofHashes ?? []); expected = 'PREFIX_OK'; }
+          catch { expected = 'SPLIT_VIEW'; }
+        }
+        const bindingAlarm = s.verdict === 'LEDGER_BINDING_MISMATCH' && s.ledger.chainBindingVerified === false && (expected === 'PREFIX_OK' || expected === 'ROOTS_EQUAL');
+        if (s.verdict !== expected && !bindingAlarm) { fails.push(`${n}: signed verdict ${s.verdict} ≠ offline recomputation ${expected} — observers may not editorialize`); continue; }
+        if (s.verdict !== 'PREFIX_OK' && s.verdict !== 'ROOTS_EQUAL') fails.push(`${n}: ALARMING verdict ${s.verdict} — signed split-view/binding evidence in the ledger`);
+        censusActual[s.verdict] = (censusActual[s.verdict] ?? 0) + 1;
+        liveCps.push({ origin: lv.origin, treeSize: lv.treeSize, rootHex: lv.rootHashHex, source: n });
+      } catch (e) { fails.push(`${n}: ${e.message}`); }
+    }
+  }
+  let newestReceipt = null;
+  for (const n of receiptNames) {
+    const r = verifyFile(join(wDir, n), pinnedKey);
+    if (!r.ok) { fails.push(`${n}: ${r.fails.join('; ')}`); continue; }
+    try {
+      const s = JSON.parse(Buffer.from(JSON.parse(readFileSync(join(wDir, n), 'utf8')).payload, 'base64').toString('utf8')).predicate?.summary;
+      if (s?.kind !== 'szl-quant-gossip-check' || s?.label !== 'REPORTED') { fails.push(`${n}: wrong kind/label for a gossip receipt`); continue; }
+      if (!newestReceipt || s.generatedAtIso > newestReceipt.s.generatedAtIso) newestReceipt = { n, s };
+    } catch (e) { fails.push(`${n}: ${e.message}`); }
+  }
+  if (receiptNames.length && !newestReceipt) fails.push('no valid engine-signed gossip receipt among those present');
+  if (newestReceipt && newestReceipt.s.observations?.archivedTotal !== obsNames.length) {
+    fails.push(`newest gossip receipt (${newestReceipt.n}) counts ${newestReceipt.s.observations?.archivedTotal} archived observation(s) but ${obsNames.length} are present`);
+  }
+  if (obsNames.length && !receiptNames.length) fails.push('observations archived but no engine-signed gossip receipt accounts for them');
+  const cps = [...liveCps];
+  try {
+    for (const n of readdirSync(wDir).filter((x) => WITNESS_RE.test(x))) {
+      try {
+        const st = JSON.parse(Buffer.from(JSON.parse(readFileSync(join(wDir, n), 'utf8')).payload, 'base64').toString('utf8'));
+        const note = st.predicate?.summary?.rekor?.inclusionProof?.checkpoint;
+        if (note) { const c0 = noteFieldsMirror(note); cps.push({ origin: c0.origin, treeSize: c0.treeSize, rootHex: c0.rootHashHex, source: n }); }
+      } catch { /* the witness pass reports unreadable receipts */ }
+    }
+  } catch { /* absent witness dir handled above */ }
+  const seenCp = new Map();
+  for (const cp of cps) {
+    const k = `${cp.origin}#${cp.treeSize}`;
+    const prev = seenCp.get(k);
+    if (prev && prev.rootHex !== cp.rootHex) fails.push(`SPLIT VIEW at ${k}: root ${prev.rootHex.slice(0, 12)}… (${prev.source}) vs ${cp.rootHex.slice(0, 12)}… (${cp.source})`);
+    if (!prev) seenCp.set(k, cp);
+  }
+  const censusStr = Object.entries(censusActual).map(([k, x]) => `${k} ${x}`).join(', ') || 'none';
+  if (fails.length) {
+    console.log(`\nGOSSIP FAIL — second observer (${obsNames.length} observation(s), census: ${censusStr})`);
+    for (const x of fails) console.log(`      FAIL: ${x}`);
+    return false;
+  }
+  console.log(`\nGOSSIP OK  second observer: ${obsNames.length} observation(s) fully re-verified offline (census: ${censusStr}); ${receiptNames.length} engine gossip receipt(s); split-view sweep clean across ${cps.length} checkpoint(s)  [REPORTED — same operator, second vantage point: stated in every receipt]`);
+  return true;
+}
+
 const args = process.argv.slice(2);
 let pinnedKey = null;
 let chainDir = null;
@@ -1073,6 +1196,7 @@ let refusalsDir = null;
 let witnessRoot = null;
 let rekorPubPath = 'keys/rekor_pubkey.pem';
 let tsaAnchorsDir = 'keys/tsa';
+let observerPubPath = 'keys/observer_pubkey.json';
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--pubkey') {
@@ -1095,10 +1219,12 @@ for (let i = 0; i < args.length; i++) {
     rekorPubPath = args[++i];
   } else if (args[i] === '--tsa-anchors') {
     tsaAnchorsDir = args[++i];
+  } else if (args[i] === '--observer-pubkey') {
+    observerPubPath = args[++i];
   } else files.push(args[i]);
 }
 if (files.length === 0 && !chainDir && !bookDir && !refusalsDir && !witnessRoot) {
-  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] [--rekor-pubkey keys/rekor_pubkey.pem] [--tsa-anchors keys/tsa] (--dir receipts/ | --chain ledger/ | --book ledger/ | --refusals ledger/ | --witness rootdir/ | receipt.json ...)');
+  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] [--rekor-pubkey keys/rekor_pubkey.pem] [--tsa-anchors keys/tsa] [--observer-pubkey keys/observer_pubkey.json] (--dir receipts/ | --chain ledger/ | --book ledger/ | --refusals ledger/ | --witness rootdir/ | receipt.json ...)');
   process.exit(2);
 }
 let allOk = true;
@@ -1115,4 +1241,5 @@ if (bookDir) allOk = verifyBook(bookDir, pinnedKey) && allOk;
 if (refusalsDir) allOk = verifyRefusals(refusalsDir, pinnedKey) && allOk;
 if (witnessRoot) allOk = verifyWitness(witnessRoot, pinnedKey, rekorPubPath) && allOk;
 if (witnessRoot) allOk = verifyTsa(witnessRoot, pinnedKey, tsaAnchorsDir) && allOk;
+if (witnessRoot) allOk = verifyGossip(witnessRoot, pinnedKey, rekorPubPath, observerPubPath) && allOk;
 process.exit(allOk ? 0 : 1);

@@ -26,6 +26,7 @@ export const PREDICATE = Object.freeze({
   book: 'https://szl.holdings/quant/book/v1',
   refusals: 'https://szl.holdings/quant/refusals/v1',
   witness: 'https://szl.holdings/quant/witness/v1',
+  gossip: 'https://szl.holdings/quant/gossip-check/v1',
 });
 
 function sha256Hex(obj) {

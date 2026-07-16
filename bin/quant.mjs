@@ -27,6 +27,7 @@ import { buildRefusalsBody, decisionForRefusals, REFUSALS_FILE_RE } from '../src
 import { buildRekordProposal, buildWitnessBody, witnessFileName, witnessTargets, WITNESS_FILE_RE, REKOR_SERVER, buildConsistencyBody, consistencyTargets, consistencyFileName, rfc6962VerifyConsistency, parseCheckpoint, CONSISTENCY_FILE_RE } from '../src/witness.mjs';
 import { sign as rawEdSign, createHash, randomBytes } from 'node:crypto';
 import { buildTimestampRequest, parseTimestampResponse, verifyTimestampToken, tsaFileName, TSA_FILE_RE, buildTsaBody } from '../src/tsa.mjs';
+import { verifyObservation, buildGossipBody, gossipFileName, OBS_FILE_RE, GOSSIP_FILE_RE, GOSSIP_SOURCE } from '../src/gossip.mjs';
 
 const TSA_AUTHORITIES = [
   { name: 'DigiCert', url: 'http://timestamp.digicert.com', anchor: 'digicert_anchor.pem' },
@@ -426,6 +427,7 @@ async function cmdWitness() {
   }
   await consistencyPass({ witnessDir, keys });
   await tsaPass({ witnessDir, keys, all: all });
+  await gossipPass({ witnessDir, ledgerDir, keys });
 }
 
 /** Generation 3: link every adjacent pair of captured checkpoints with an
@@ -678,4 +680,90 @@ async function stampOneHead({ t, witnessDir, keys, backfilled }) {
   }
   console.log(`witness UNAVAILABLE (tsa seq ${t.seq}) — no authority produced a verifiable token — honest gap, retried next run`);
   return false;
+}
+
+/** Generation 5: cross-witness gossip — fetch, fully re-verify, and archive
+ *  the second observer's signed observations, then account for them in an
+ *  engine-signed gossip receipt. Fail-soft: an unreachable observer is an
+ *  honest, counted gap; a BAD observation is a loud rejection recorded in
+ *  the signed receipt — never a silent drop, never a silent accept. */
+async function gossipPass({ witnessDir, ledgerDir, keys }) {
+  const gossipDir = join(witnessDir, 'gossip');
+  ensureDirSync(gossipDir, { recursive: true });
+  let observerPin; let rekorPem;
+  try {
+    observerPin = JSON.parse(readFileSync(join(ROOT, 'keys', 'observer_pubkey.json'), 'utf8'));
+    rekorPem = readFileSync(join(ROOT, 'keys', 'rekor_pubkey.pem'), 'utf8');
+  } catch (e) {
+    console.log(`gossip UNAVAILABLE — pins missing (${e.message}) — refusing to trust an unpinned observer`);
+    return;
+  }
+  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'szl-quant-gossip' };
+  const ghTok = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+  if (ghTok) headers.Authorization = `Bearer ${ghTok}`;
+  const fetchedAtIso = new Date().toISOString();
+  let listing;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GOSSIP_SOURCE.repo}/contents/${GOSSIP_SOURCE.dir}?ref=${GOSSIP_SOURCE.branch}`, { headers, signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    listing = await res.json();
+  } catch (e) {
+    console.log(`gossip UNAVAILABLE — cannot list ${GOSSIP_SOURCE.repo}@${GOSSIP_SOURCE.branch} (${e.message}) — no receipt written (absence is honest)`);
+    return;
+  }
+  const remote = (Array.isArray(listing) ? listing : []).filter((x) => OBS_FILE_RE.test(x.name));
+  const existing = new Set(readdirSync(gossipDir).filter((n) => OBS_FILE_RE.test(n)));
+  const rejected = [];
+  let newArchived = 0;
+  for (const item of remote.filter((x) => !existing.has(x.name)).sort((p, q) => p.name.localeCompare(q.name))) {
+    let bytes;
+    try {
+      const res = await fetch(item.download_url, { headers: { 'User-Agent': 'szl-quant-gossip' }, signal: AbortSignal.timeout(30000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      bytes = Buffer.from(await res.arrayBuffer());
+    } catch (e) {
+      console.log(`gossip gap — could not fetch ${item.name} (${e.message}); counted in the open, not hidden`);
+      continue;
+    }
+    let outcome;
+    try {
+      const env = JSON.parse(bytes.toString('utf8'));
+      const sm = JSON.parse(Buffer.from(env.payload, 'base64').toString('utf8')).predicate?.summary ?? {};
+      let witnessReceiptBytes = null;
+      try { witnessReceiptBytes = readFileSync(join(witnessDir, String(sm.ledger?.witnessFile ?? ''))); } catch { /* stays null — fails closed */ }
+      let chainSha256Local = null;
+      try { chainSha256Local = createHash('sha256').update(readFileSync(join(ledgerDir, String(sm.ledger?.chainRunDir ?? ''), String(sm.ledger?.chainFile ?? '')))).digest('hex'); } catch { /* stays null — fails closed */ }
+      outcome = verifyObservation({ envelope: env, observerPubkeyJson: observerPin, rekorPem, witnessReceiptBytes, chainSha256Local });
+    } catch (e) {
+      outcome = { ok: false, reason: `unparseable observation: ${e.message}` };
+    }
+    if (outcome.ok) {
+      writeFileSync(join(gossipDir, item.name), bytes);
+      newArchived += 1;
+      console.log(`gossip archived ${item.name} — verdict ${outcome.verdict} (fully re-verified offline before archiving)`);
+    } else {
+      rejected.push({ file: item.name, reason: outcome.reason });
+      console.log(`gossip REJECTED ${item.name}: ${outcome.reason}`);
+    }
+  }
+  const archived = readdirSync(gossipDir).filter((n) => OBS_FILE_RE.test(n)).sort();
+  const census = {};
+  let newest = null;
+  for (const n of archived) {
+    try {
+      const sm = JSON.parse(Buffer.from(JSON.parse(readFileSync(join(gossipDir, n), 'utf8')).payload, 'base64').toString('utf8')).predicate.summary;
+      census[sm.verdict] = (census[sm.verdict] ?? 0) + 1;
+      if (!newest || sm.observedAtIso > newest.observedAtIso) newest = { file: n, observedAtIso: sm.observedAtIso, verdict: sm.verdict };
+    } catch { /* unreadable archived observation fails loudly in verify */ }
+  }
+  const haveReceipt = readdirSync(witnessDir).some((n) => GOSSIP_FILE_RE.test(n));
+  if (newArchived === 0 && rejected.length === 0 && haveReceipt) {
+    console.log(`gossip unchanged — ${archived.length} observation(s) archived, no new receipt written (absence of change is honest)`);
+    return;
+  }
+  const headSeq = Math.max(0, ...readdirSync(witnessDir).map((n) => (WITNESS_FILE_RE.test(n) ? Number(n.slice(8, 12)) : 0)));
+  const body = buildGossipBody({ headSeq, fetchedAtIso, remoteTotal: remote.length, newArchived, archivedTotal: archived.length, rejected, census, newestObservation: newest, nowIso: new Date().toISOString() });
+  const { envelope } = signReceipt({ predicateType: PREDICATE.gossip, subjectName: `szl-quant/witness/gossip-seq-${headSeq}`, subjectBody: body, predicate: { summary: body }, privateKey: keys.privateKey, publicKey: keys.publicKey });
+  writeFileSync(join(witnessDir, gossipFileName(headSeq, Date.now())), JSON.stringify(envelope, null, 2) + '\n');
+  console.log(`gossip OK — ${newArchived} new / ${archived.length} total observation(s) from the second observer${rejected.length ? `, ${rejected.length} REJECTED (loud in the receipt)` : ''} → signed gossip receipt [REPORTED]`);
 }
