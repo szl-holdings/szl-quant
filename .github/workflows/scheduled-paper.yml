@@ -85,7 +85,7 @@ jobs:
           # independently — the publish fails closed if any check fails.
           node "$GITHUB_WORKSPACE/bin/quant.mjs" chain --ledger ledger --dest "$(basename "$DEST")"
           # Anchor the new chain head in the Rekor public transparency log (fail-soft: an outage is an honest, counted gap).
-          node "$GITHUB_WORKSPACE/bin/quant.mjs" witness --ledger ledger --witness-dir witness
+          node "$GITHUB_WORKSPACE/bin/quant.mjs" witness --ledger ledger --witness-dir witness --all
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --dir "$DEST"
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --chain ledger
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --book ledger
@@ -159,7 +159,8 @@ jobs:
                 let links = 0;
                 for (const d of dirs) for (const f of fs.readdirSync("ledger/"+d)) if (/^chain_\d{4}\.receipt\.json$/.test(f)) links++;
                 const seqs = new Set(wbodies.map(b => b.chain.seq));
-                witnessLine = `External witness (REPORTED, SET offline-verifiable): chain head seq ${wh.chain.seq} anchored in Rekor — logIndex ${wh.rekor.logIndex}, uuid ${String(wh.rekor.uuid).slice(0,16)}… · heads anchored ${seqs.size}/${links} · an anchored head cannot be silently truncated · check: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .\``;
+                const proven = new Set(wbodies.filter(b => b.rekor && b.rekor.inclusionProof).map(b => b.chain.seq));
+                witnessLine = `External witness (REPORTED, SET + Merkle inclusion offline-verifiable): chain head seq ${wh.chain.seq} anchored in Rekor — logIndex ${wh.rekor.logIndex}, uuid ${String(wh.rekor.uuid).slice(0,16)}… · heads anchored ${seqs.size}/${links} · inclusion proven offline ${proven.size}/${links} · an anchored head cannot be silently truncated · check: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .\``;
               }
             } catch {}
             // Hash-chain headline from the newest chain receipt (fail-soft).

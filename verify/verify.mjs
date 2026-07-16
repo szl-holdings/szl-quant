@@ -497,6 +497,52 @@ function rekordFieldsMirror(entryBodyBase64) {
   return { dataSha256: hash.value, signatureBase64: sig.content, publicKeyPemBase64: sig.publicKey.content };
 }
 
+// ---- external witness: RFC 6962 inclusion mirrors (self-contained on purpose —
+// this verifier audits the engine and must not trust its code) ----
+function rfcLeafMirror(bytes) { return createHash('sha256').update(Buffer.concat([Buffer.from([0x00]), bytes])).digest(); }
+function rfcNodeMirror(l, r) { return createHash('sha256').update(Buffer.concat([Buffer.from([0x01]), l, r])).digest(); }
+function rfcRootMirror(leafIndex, treeSize, leafHash, hashesHex) {
+  if (!Number.isInteger(leafIndex) || !Number.isInteger(treeSize) || leafIndex < 0 || treeSize < 1 || leafIndex >= treeSize) throw new Error(`leaf index ${leafIndex} outside tree of size ${treeSize}`);
+  const path = (hashesHex ?? []).map((h) => { const b = Buffer.from(String(h), 'hex'); if (b.length !== 32) throw new Error('sibling hash is not 32 bytes'); return b; });
+  let h = leafHash;
+  let idx = leafIndex;
+  let last = treeSize - 1;
+  let used = 0;
+  while (last > 0) {
+    if (idx % 2 === 1) { if (used >= path.length) throw new Error('audit path too short'); h = rfcNodeMirror(path[used++], h); }
+    else if (idx < last) { if (used >= path.length) throw new Error('audit path too short'); h = rfcNodeMirror(h, path[used++]); }
+    idx = Math.floor(idx / 2);
+    last = Math.floor(last / 2);
+  }
+  if (used !== path.length) throw new Error(`${path.length - used} unconsumed sibling hash(es)`);
+  return h;
+}
+/** Verify a Rekor checkpoint (signed note) against the pinned rekor key.
+ *  The 4-byte key hint must match sha256(SPKI)[0..4] AND the ECDSA
+ *  signature must verify over the exact note body. */
+function checkpointMirror(text, rekorPub) {
+  const sep = typeof text === 'string' ? text.indexOf('\n\n') : -1;
+  if (sep < 0) return { ok: false, reason: 'checkpoint has no blank-line separator' };
+  const noteBody = text.slice(0, sep + 1);
+  const lines = noteBody.split('\n');
+  if (lines.length < 4 || !/^\S+ - \d+$/.test(lines[0]) || !/^\d+$/.test(lines[1])) return { ok: false, reason: 'checkpoint note malformed' };
+  const treeSize = Number(lines[1]);
+  const root = Buffer.from(lines[2], 'base64');
+  if (!Number.isSafeInteger(treeSize) || treeSize < 1 || root.length !== 32 || root.toString('base64') !== lines[2]) return { ok: false, reason: 'checkpoint tree size or root hash malformed' };
+  const hint = createHash('sha256').update(rekorPub.export({ type: 'spki', format: 'der' })).digest().slice(0, 4).toString('hex');
+  let sawHint = false;
+  for (const line of text.slice(sep + 2).split('\n')) {
+    if (!line) continue;
+    const m = line.match(/^\u2014 \S+ (\S+)$/);
+    if (!m) continue;
+    const raw = Buffer.from(m[1], 'base64');
+    if (raw.length < 5 || raw.slice(0, 4).toString('hex') !== hint) continue;
+    sawHint = true;
+    try { if (edVerify('sha256', Buffer.from(noteBody, 'utf8'), rekorPub, raw.slice(4))) return { ok: true, treeSize, rootHashHex: root.toString('hex') }; } catch { /* fail closed below */ }
+  }
+  return { ok: false, reason: sawHint ? 'checkpoint signature INVALID over the signed note' : 'no checkpoint signature carries the pinned rekor key hint' };
+}
+
 function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
   if (!pinnedKey) { console.log('WITNESS FAIL: --witness requires --pubkey (pinned engine key) — refusing TOFU here'); return false; }
   let rekorPub;
@@ -509,6 +555,8 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
   if (names.length === 0) { console.log('WITNESS FAIL: no witness receipts under ' + wDir); return false; }
   const problems = [];
   const anchoredSeqs = new Set();
+  const provenSeqs = new Set();
+  let setOnly = 0;
   let latest = null;
   for (const n of names) {
     const full = join(wDir, n);
@@ -541,6 +589,24 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
         problems.push(`${n}: rekor SET INVALID — no offline proof rekor accepted this entry`);
       }
     } catch (e) { problems.push(`${n}: SET check failed: ${e.message}`); }
+    // 4) Merkle inclusion (generation 2): the leaf recomputed from the entry
+    // bytes must walk the audit path onto the checkpoint's SIGNED root.
+    const ip = body.rekor?.inclusionProof;
+    if (ip) {
+      const cp = checkpointMirror(ip.checkpoint, rekorPub);
+      if (!cp.ok) problems.push(`${n}: ${cp.reason}`);
+      else if (cp.treeSize !== ip.treeSize) problems.push(`${n}: inclusion tree size mismatch (proof says ${ip.treeSize}, signed checkpoint says ${cp.treeSize})`);
+      else if (cp.rootHashHex !== ip.rootHash) problems.push(`${n}: inclusion root mismatch — proof root differs from the signed checkpoint root`);
+      else {
+        try {
+          const computed = rfcRootMirror(ip.logIndex, ip.treeSize, rfcLeafMirror(Buffer.from(body.rekor.entryBodyBase64, 'base64')), ip.hashes);
+          if (!computed.equals(Buffer.from(cp.rootHashHex, 'hex'))) problems.push(`${n}: audit path does NOT land on the signed root — entry not proven in this tree`);
+          else if (Number.isInteger(body.chain?.seq)) provenSeqs.add(body.chain.seq);
+        } catch (e) { problems.push(`${n}: inclusion proof rejected: ${e.message}`); }
+      }
+    } else {
+      setOnly += 1; // generation-1 receipt: SET-only, and it SAYS so in its limits
+    }
     if (Number.isInteger(body.chain?.seq)) {
       anchoredSeqs.add(body.chain.seq);
       if (!latest || body.chain.seq > latest.chain.seq) latest = body;
@@ -556,8 +622,10 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
   for (const p of problems) console.log(`      WITNESS FAIL: ${p}`);
   if (problems.length === 0 && latest) {
     const t = new Date(latest.rekor.integratedTime * 1000).toISOString();
-    console.log(`WITNESS OK  anchors=${names.length}  heads anchored=${anchoredSeqs.size}/${linkSeqs.size} chain links  latest: seq ${latest.chain.seq} \u2192 rekor logIndex ${latest.rekor.logIndex} (integrated ${t}) [REPORTED, SET verified offline]`);
+    const setOnlyNote = setOnly > 0 ? ` (${setOnly} SET-only receipt(s) — each states that limit itself)` : '';
+    console.log(`WITNESS OK  anchors=${names.length}  heads anchored=${anchoredSeqs.size}/${linkSeqs.size} chain links  inclusion proven offline=${provenSeqs.size}/${linkSeqs.size}${setOnlyNote}  latest: seq ${latest.chain.seq} \u2192 rekor logIndex ${latest.rekor.logIndex} (integrated ${t}) [REPORTED, SET verified offline${provenSeqs.size > 0 ? ' + Merkle inclusion replayed offline' : ''}]`);
     console.log('      note: anchored heads live in a public append-only log — deleting this ledger does not delete the anchors; unwitnessed links are counted above, not hidden');
+    if (provenSeqs.size > 0) console.log('      note: inclusion is proven against the checkpoint captured at anchor time — checkpoint-to-checkpoint consistency is not verified offline');
     return true;
   }
   console.log('WITNESS BROKEN');

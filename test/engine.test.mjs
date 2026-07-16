@@ -480,7 +480,8 @@ test('witness: body is deterministic, REPORTED-labeled and states its limits', (
   const b = buildWitnessBody(JSON.parse(JSON.stringify(args)));
   assert.equal(canonicalize(a), canonicalize(b));
   assert.equal(a.labels.anchor, 'REPORTED');
-  assert.equal(a.limits.length, 2);
+  assert.equal(a.limits.length, 3);
+  assert.ok(a.limits.some((l) => l.includes('Merkle inclusion proof is not verified offline here')));
   assert.equal(a.kind, 'szl-quant-witness');
 });
 
@@ -497,4 +498,132 @@ test('chain: file-name pattern is strict (no spoofing via lookalike names)', () 
   assert.ok(!CHAIN_FILE_RE.test('chain_1.receipt.json'));
   assert.ok(!CHAIN_FILE_RE.test('xchain_0001.receipt.json'));
   assert.ok(!CHAIN_FILE_RE.test('chain_0001.receipt.json.bak'));
+});
+
+// ── external witness: Merkle inclusion proofs (frontier 7) ─────────────────
+import { rfc6962LeafHash, rfc6962NodeHash, rfc6962Root, parseCheckpoint, verifyCheckpoint, verifyInclusionProof, witnessTargets } from '../src/witness.mjs';
+import { generateKeyPairSync as genKeys2, sign as rawSign2, createHash as mkHash2 } from 'node:crypto';
+
+// Independent RFC 6962 implementations (recursive MTH + proof builder) so the
+// walker is checked against a second derivation, not against itself.
+function naiveMTH(leaves) {
+  if (leaves.length === 1) return rfc6962LeafHash(leaves[0]);
+  let k = 1; while (k * 2 < leaves.length) k *= 2;
+  return rfc6962NodeHash(naiveMTH(leaves.slice(0, k)), naiveMTH(leaves.slice(k)));
+}
+function naiveProof(m, leaves) {
+  if (leaves.length === 1) return [];
+  let k = 1; while (k * 2 < leaves.length) k *= 2;
+  return m < k
+    ? [...naiveProof(m, leaves.slice(0, k)), naiveMTH(leaves.slice(k))]
+    : [...naiveProof(m - k, leaves.slice(k)), naiveMTH(leaves.slice(0, k))];
+}
+function makeCheckpoint(rootBuf, treeSize, ecPriv, ecPub, name) {
+  const body = name + ' - 42\n' + treeSize + '\n' + rootBuf.toString('base64') + '\n';
+  const hint = mkHash2('sha256').update(ecPub.export({ type: 'spki', format: 'der' })).digest().slice(0, 4);
+  const sig = rawSign2('sha256', Buffer.from(body, 'utf8'), ecPriv);
+  return body + '\n\u2014 ' + name + ' ' + Buffer.concat([hint, sig]).toString('base64') + '\n';
+}
+
+test('witness: RFC6962 audit paths verify against an independently built tree, tampering fails', () => {
+  for (const n of [1, 2, 3, 5, 7, 8]) {
+    const leaves = Array.from({ length: n }, (_, i) => Buffer.from('leaf-' + i));
+    const root = naiveMTH(leaves);
+    for (let m = 0; m < n; m++) {
+      const path = naiveProof(m, leaves).map((b) => b.toString('hex'));
+      const got = rfc6962Root({ leafIndex: m, treeSize: n, leafHash: rfc6962LeafHash(leaves[m]), pathHex: path });
+      assert.equal(got.toString('hex'), root.toString('hex'), 'size ' + n + ' leaf ' + m);
+    }
+  }
+  const leaves = Array.from({ length: 5 }, (_, i) => Buffer.from('leaf-' + i));
+  const path = naiveProof(2, leaves).map((b) => b.toString('hex'));
+  const bad = [...path]; bad[0] = bad[0].replace(/^../, bad[0].startsWith('00') ? '11' : '00');
+  const got = rfc6962Root({ leafIndex: 2, treeSize: 5, leafHash: rfc6962LeafHash(leaves[2]), pathHex: bad });
+  assert.notEqual(got.toString('hex'), naiveMTH(leaves).toString('hex'));
+});
+
+test('witness: rfc6962Root fails closed on structural violations', () => {
+  const leaf = rfc6962LeafHash(Buffer.from('x'));
+  assert.throws(() => rfc6962Root({ leafIndex: 5, treeSize: 5, leafHash: leaf, pathHex: [] }), /outside tree/);
+  assert.throws(() => rfc6962Root({ leafIndex: 1, treeSize: 4, leafHash: leaf, pathHex: [] }), /too short/);
+  const leaves = [Buffer.from('a'), Buffer.from('b')];
+  const path = naiveProof(0, leaves).map((b) => b.toString('hex'));
+  assert.throws(() => rfc6962Root({ leafIndex: 0, treeSize: 2, leafHash: rfc6962LeafHash(leaves[0]), pathHex: [...path, path[0]] }), /unconsumed/);
+  assert.throws(() => rfc6962Root({ leafIndex: 0, treeSize: 2, leafHash: rfc6962LeafHash(leaves[0]), pathHex: ['abcd'] }), /32 bytes/);
+});
+
+test('witness: checkpoint signed-note roundtrip — pinned-hint match, tamper and wrong-key fail', () => {
+  const { privateKey: p1, publicKey: k1 } = genKeys2('ec', { namedCurve: 'prime256v1' });
+  const { publicKey: k2 } = genKeys2('ec', { namedCurve: 'prime256v1' });
+  const root = mkHash2('sha256').update('root').digest();
+  const cp = makeCheckpoint(root, 123, p1, k1, 'test.log');
+  const parsed = parseCheckpoint(cp);
+  assert.equal(parsed.treeSize, 123);
+  assert.equal(parsed.rootHashHex, root.toString('hex'));
+  const ok = verifyCheckpoint(cp, k1.export({ type: 'spki', format: 'pem' }));
+  assert.equal(ok.ok, true);
+  assert.equal(ok.treeSize, 123);
+  const tampered = cp.replace('\n123\n', '\n124\n');
+  const bad = verifyCheckpoint(tampered, k1.export({ type: 'spki', format: 'pem' }));
+  assert.equal(bad.ok, false);
+  const wrongKey = verifyCheckpoint(cp, k2.export({ type: 'spki', format: 'pem' }));
+  assert.equal(wrongKey.ok, false);
+  assert.match(wrongKey.reason, /hint/);
+});
+
+test('witness: parseCheckpoint refuses malformed notes', () => {
+  assert.throws(() => parseCheckpoint('no separator at all\n'), /separator/);
+  assert.throws(() => parseCheckpoint('origin - 1\nNaN\nAAAA\n\n\u2014 x AAAAAAAA\n'), /tree-size/);
+  assert.throws(() => parseCheckpoint('origin - 1\n5\nnot-base64-32\n\n\u2014 x AAAAAAAA\n'), /root hash/);
+  assert.throws(() => parseCheckpoint('origin - 1\n5\n' + Buffer.alloc(32).toString('base64') + '\n\nbad sig line\n'), /signature line/);
+});
+
+test('witness: verifyInclusionProof binds the exact entry bytes to the signed root', () => {
+  const { privateKey: ecPriv, publicKey: ecPub } = genKeys2('ec', { namedCurve: 'prime256v1' });
+  const pem = ecPub.export({ type: 'spki', format: 'pem' });
+  const entryBytes = Buffer.from(JSON.stringify({ kind: 'rekord', spec: { data: { hash: { algorithm: 'sha256', value: 'aa' } } } }));
+  const leaves = [Buffer.from('other-0'), entryBytes, Buffer.from('other-2'), Buffer.from('other-3')];
+  const root = naiveMTH(leaves);
+  const proof = {
+    logIndex: 1,
+    treeSize: 4,
+    rootHash: root.toString('hex'),
+    hashes: naiveProof(1, leaves).map((b) => b.toString('hex')),
+    checkpoint: makeCheckpoint(root, 4, ecPriv, ecPub, 'test.log'),
+  };
+  const good = verifyInclusionProof({ entryBodyBase64: entryBytes.toString('base64'), proof, logPublicKeyPem: pem });
+  assert.equal(good.ok, true);
+  const flipped = Buffer.from(entryBytes); flipped[3] ^= 0xff;
+  const bad = verifyInclusionProof({ entryBodyBase64: flipped.toString('base64'), proof, logPublicKeyPem: pem });
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /NOT land/);
+  const badRoot = { ...proof, rootHash: proof.rootHash.replace(/^../, proof.rootHash.startsWith('00') ? '11' : '00') };
+  const rootMismatch = verifyInclusionProof({ entryBodyBase64: entryBytes.toString('base64'), proof: badRoot, logPublicKeyPem: pem });
+  assert.equal(rootMismatch.ok, false);
+  assert.match(rootMismatch.reason, /root hash mismatch|checkpoint root/i);
+});
+
+test('witness: body carries the inclusion proof and states the matching limit', () => {
+  const chain = { seq: 3, runDir: 'd', file: 'chain_0003.receipt.json', sha256: 'ab' };
+  const rekor = { server: 'https://rekor.sigstore.dev', uuid: 'u', logIndex: 10, logID: 'lid', integratedTime: 1000, entryBodyBase64: 'AA==', signedEntryTimestampBase64: 'BB==' };
+  const inclusion = { logIndex: 5, treeSize: 9, rootHash: 'cc', hashes: ['dd'], checkpoint: 'x - 1\n9\nAAA=\n\n\u2014 x AAAAAAAA\n' };
+  const withProof = buildWitnessBody({ chain, rekor, inclusion, nowIso: 't' });
+  assert.deepEqual(withProof, buildWitnessBody({ chain, rekor, inclusion, nowIso: 't' }));
+  assert.equal(withProof.rekor.inclusionProof.treeSize, 9);
+  assert.equal(withProof.rekor.inclusionProof.logIndex, 5);
+  assert.ok(withProof.limits.some((l) => l.includes('checkpoint captured at anchor time')));
+  assert.ok(!withProof.limits.some((l) => l.includes('not verified offline here')));
+  const setOnly = buildWitnessBody({ chain, rekor, nowIso: 't' });
+  assert.equal(setOnly.rekor.inclusionProof, undefined);
+  assert.ok(setOnly.limits.some((l) => l.includes('not verified offline here')));
+  assert.ok(withProof.limits.some((l) => l.includes('backfilled')));
+});
+
+test('witness: witnessTargets — default anchors the fresh head only, --all backfills unproven links', () => {
+  const links = [{ seq: 1 }, { seq: 2 }, { seq: 3 }];
+  assert.deepEqual(witnessTargets({ chainLinks: links, receipts: [], all: false }).map((l) => l.seq), [3]);
+  assert.deepEqual(witnessTargets({ chainLinks: links, receipts: [{ seq: 3, hasInclusionProof: false }], all: false }), []);
+  assert.deepEqual(witnessTargets({ chainLinks: links, receipts: [{ seq: 3, hasInclusionProof: false }], all: true }).map((l) => l.seq), [1, 2, 3]);
+  assert.deepEqual(witnessTargets({ chainLinks: links, receipts: [{ seq: 2, hasInclusionProof: true }, { seq: 3, hasInclusionProof: true }], all: true }).map((l) => l.seq), [1]);
+  assert.deepEqual(witnessTargets({ chainLinks: [], receipts: [], all: true }), []);
 });
