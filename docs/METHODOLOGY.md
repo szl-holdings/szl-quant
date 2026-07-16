@@ -151,3 +151,20 @@ What the book does NOT claim: no depth/latency/partial-fill realism, no
 real funds, no performance promise. Equity is MODELED over REPORTED
 marks. Starting capital (10,000 paper USD) is a declared simulation
 constant, not money.
+
+## Refusal record (MEASURED)
+
+Each scheduled run also emits a signed `refusals_*.receipt.json`: a
+census of that run's decisions — verdict, proposed action, echoed
+conviction (HEURISTIC, ceiling-capped upstream), and the exact gates in
+`blockedBy`. Counts are MEASURED over the DSSE-verified decision
+receipts in the run dir alone; unverifiable files are excluded and
+confessed in-band. `verify --refusals ledger/` recomputes every count
+from the signed receipts — the census must replay byte-exact.
+
+Why this exists: the record is refusal-dominated (conviction floor 0.55
+vs low Hoeffding-shaped sample confidence at ~120 daily observations),
+and doctrine requires the reasons to be countable on the ledger rather
+than explained away in prose. Limits, stated plainly: the census says
+WHY entries were refused, not whether refusing was right; per-run scope
+only; no performance claim of any kind.
