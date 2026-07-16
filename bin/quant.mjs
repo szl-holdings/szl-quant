@@ -24,6 +24,9 @@ import { ensureIdentity, loadPublicKeyFromSpkiBase64 } from '../src/keys.mjs';
 import { verifyEnvelope } from '../src/dsse.mjs';
 import { verifySignalEnvelopes, buildTrackRecord, HORIZONS_DAYS } from '../src/track.mjs';
 import { buildRefusalsBody, decisionForRefusals, REFUSALS_FILE_RE } from '../src/refusals.mjs';
+import { buildRekordProposal, buildWitnessBody, witnessFileName, WITNESS_FILE_RE, REKOR_SERVER } from '../src/witness.mjs';
+import { sign as rawEdSign } from 'node:crypto';
+import { mkdirSync as ensureDirSync } from 'node:fs';
 import { scanLedgerForChain, buildChainBody } from '../src/chain.mjs';
 import { scanLedgerForBook, buildBookBody, decisionForBook } from '../src/book.mjs';
 import { LABELS } from '../src/canon.mjs';
@@ -382,6 +385,75 @@ async function cmdRefusals() {
   console.log('  note: a BLOCKED verdict is a decision, not an absence — the reasons are now countable on the ledger');
 }
 
+async function cmdWitness() {
+  const ledgerDir = arg('ledger', join(ROOT, 'ledger'));
+  const witnessDir = arg('witness-dir', join(ROOT, 'witness'));
+  const keys = ensureIdentity(KEY_PRIV, KEY_PUB_JSON);
+  const { chains } = scanLedgerForChain(ledgerDir, { readdirSync, readFileSync });
+  const head = chains.length ? chains[chains.length - 1] : null;
+  if (!head || !Number.isInteger(head.seq)) { console.log('witness: no chain head to anchor — nothing to witness'); return; }
+  ensureDirSync(witnessDir, { recursive: true });
+  const prefix = 'witness_' + String(head.seq).padStart(4, '0') + '_';
+  if (readdirSync(witnessDir).some((n) => WITNESS_FILE_RE.test(n) && n.startsWith(prefix))) {
+    console.log(`witness: chain head seq ${head.seq} already anchored — honest no-op`);
+    return;
+  }
+  const chainBytes = readFileSync(join(ledgerDir, head.runDir, head.file));
+  const sig = rawEdSign(null, chainBytes, keys.privateKey);
+  const pem = keys.publicKey.export({ type: 'spki', format: 'pem' });
+  const proposal = buildRekordProposal({ artifactBytes: chainBytes, signatureBase64: sig.toString('base64'), publicKeyPem: pem });
+  // Fail-soft on ANY rekor problem: an unwitnessed head is an honest,
+  // counted gap — inventing or deferring receipts would not be.
+  let entry = null;
+  try {
+    const res = await fetch(`${REKOR_SERVER}/api/v1/log/entries`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(proposal),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (res.status === 201) {
+      entry = await res.json();
+    } else if (res.status === 409) {
+      // identical entry already integrated (e.g. rerun) — fetch it; same anchor
+      const loc = res.headers.get('location');
+      if (loc) {
+        const res2 = await fetch(`${REKOR_SERVER}${loc}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(30000) });
+        if (res2.ok) entry = await res2.json();
+      }
+      if (!entry) { console.log('witness UNAVAILABLE — rekor reports the entry exists (409) but re-fetch failed — no receipt written (absence is honest)'); return; }
+    } else {
+      console.log(`witness UNAVAILABLE — rekor HTTP ${res.status}: ${(await res.text()).slice(0, 160)} — no receipt written (absence is honest)`);
+      return;
+    }
+  } catch (e) {
+    console.log(`witness UNAVAILABLE — rekor unreachable (${e.message}) — no receipt written (absence is honest)`);
+    return;
+  }
+  const uuid = Object.keys(entry ?? {})[0];
+  const rec = uuid ? entry[uuid] : null;
+  if (!rec?.verification?.signedEntryTimestamp || !rec.body || !Number.isInteger(rec.logIndex) || !Number.isInteger(rec.integratedTime) || !rec.logID) {
+    console.log('witness UNAVAILABLE — rekor response missing SET/body/logIndex — no receipt written (absence is honest)');
+    return;
+  }
+  const body = buildWitnessBody({
+    chain: { seq: head.seq, runDir: head.runDir, file: head.file, sha256: head.sha256 },
+    rekor: { server: REKOR_SERVER, uuid, logIndex: rec.logIndex, logID: rec.logID, integratedTime: rec.integratedTime, entryBodyBase64: rec.body, signedEntryTimestampBase64: rec.verification.signedEntryTimestamp },
+    nowIso: new Date().toISOString(),
+  });
+  const { envelope } = signReceipt({
+    predicateType: PREDICATE.witness,
+    subjectName: `szl-quant/witness/chain-seq-${head.seq}`,
+    subjectBody: body,
+    predicate: { summary: body },
+    privateKey: keys.privateKey, publicKey: keys.publicKey,
+  });
+  const file = join(witnessDir, witnessFileName(head.seq, Date.now()));
+  writeFileSync(file, JSON.stringify(envelope, null, 2) + '\n');
+  console.log(`witness: chain head seq ${head.seq} anchored in rekor — logIndex ${rec.logIndex}, uuid ${uuid.slice(0, 16)}… [REPORTED] → ${file}`);
+  console.log('  note: the anchor lives in a public append-only log — deleting the ledger does not delete it');
+}
+
 const cmd = process.argv[2];
 if (cmd === 'backtest') await cmdBacktest();
 else if (cmd === 'paper') await cmdPaper();
@@ -389,7 +461,8 @@ else if (cmd === 'track') await cmdTrack();
 else if (cmd === 'chain') await cmdChain();
 else if (cmd === 'book') await cmdBook();
 else if (cmd === 'refusals') await cmdRefusals();
+else if (cmd === 'witness') await cmdWitness();
 else {
-  console.log('usage: node bin/quant.mjs <backtest|paper|track|chain|book|refusals> [--days N] [--out DIR] [--ledger DIR] [--dest RUN_DIR]');
+  console.log('usage: node bin/quant.mjs <backtest|paper|track|chain|book|refusals|witness> [--days N] [--out DIR] [--ledger DIR] [--dest RUN_DIR] [--witness-dir DIR]');
   process.exit(2);
 }
