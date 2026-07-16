@@ -627,3 +627,111 @@ test('witness: witnessTargets — default anchors the fresh head only, --all bac
   assert.deepEqual(witnessTargets({ chainLinks: links, receipts: [{ seq: 2, hasInclusionProof: true }, { seq: 3, hasInclusionProof: true }], all: true }).map((l) => l.seq), [1]);
   assert.deepEqual(witnessTargets({ chainLinks: [], receipts: [], all: true }), []);
 });
+
+// ── frontier 8: RFC 6962 checkpoint consistency, cross-checked against an
+// independent naive generator (never verified against itself) ────────────
+import {
+  rfc6962VerifyConsistency,
+  buildConsistencyBody,
+  consistencyTargets,
+  CONSISTENCY_FILE_RE,
+  consistencyFileName,
+} from '../src/witness.mjs';
+import { createHash as chC } from 'node:crypto';
+
+const nLeafC = (i) => chC('sha256').update(`consistency-leaf-${i}`).digest();
+const lhC = (b) => chC('sha256').update(Buffer.concat([Buffer.from([0]), b])).digest();
+const nhC = (l, r) => chC('sha256').update(Buffer.concat([Buffer.from([1]), l, r])).digest();
+function mthC(leaves) {
+  if (leaves.length === 1) return lhC(leaves[0]);
+  let k = 1; while (k * 2 < leaves.length) k *= 2;
+  return nhC(mthC(leaves.slice(0, k)), mthC(leaves.slice(k)));
+}
+function subproofC(m, D, b) {
+  const n = D.length;
+  if (m === n) return b ? [] : [mthC(D)];
+  let k = 1; while (k * 2 < n) k *= 2;
+  if (m <= k) return [...subproofC(m, D.slice(0, k), b), mthC(D.slice(k))];
+  return [...subproofC(m - k, D.slice(k), false), mthC(D.slice(0, k))];
+}
+const proofC = (m, D) => subproofC(m, D, true);
+
+test('consistency: naive RFC 6962 generator proofs verify for every (m,n) pair up to 17 leaves', () => {
+  for (let n = 1; n <= 17; n++) {
+    const D = Array.from({ length: n }, (_, i) => nLeafC(i));
+    for (let m = 1; m <= n; m++) {
+      const ok = rfc6962VerifyConsistency({
+        firstSize: m, secondSize: n,
+        firstRootHex: mthC(D.slice(0, m)).toString('hex'),
+        secondRootHex: mthC(D).toString('hex'),
+        proofHex: proofC(m, D).map((h) => h.toString('hex')),
+      });
+      assert.equal(ok, true, `m=${m} n=${n}`);
+    }
+  }
+});
+
+test('consistency: any tampered byte fails closed', () => {
+  const D = Array.from({ length: 13 }, (_, i) => nLeafC(i));
+  const good = {
+    firstSize: 6, secondSize: 13,
+    firstRootHex: mthC(D.slice(0, 6)).toString('hex'),
+    secondRootHex: mthC(D).toString('hex'),
+    proofHex: proofC(6, D).map((h) => h.toString('hex')),
+  };
+  assert.equal(rfc6962VerifyConsistency(good), true);
+  const flip = (hex) => (hex[0] === '0' ? '1' : '0') + hex.slice(1);
+  assert.throws(() => rfc6962VerifyConsistency({ ...good, proofHex: [flip(good.proofHex[0]), ...good.proofHex.slice(1)] }));
+  assert.throws(() => rfc6962VerifyConsistency({ ...good, firstRootHex: flip(good.firstRootHex) }), /OLD root|prefix/);
+  assert.throws(() => rfc6962VerifyConsistency({ ...good, secondRootHex: flip(good.secondRootHex) }), /NEW root|later signed root/);
+  assert.throws(() => rfc6962VerifyConsistency({ ...good, proofHex: good.proofHex.slice(0, -1) }), /exhausted|differs/);
+  assert.throws(() => rfc6962VerifyConsistency({ ...good, proofHex: [...good.proofHex, good.proofHex[0]] }), /too many/);
+});
+
+test('consistency: structural rejections fail closed', () => {
+  const r = 'ab'.repeat(32);
+  assert.throws(() => rfc6962VerifyConsistency({ firstSize: 0, secondSize: 5, firstRootHex: r, secondRootHex: r, proofHex: [] }), /invalid tree sizes/);
+  assert.throws(() => rfc6962VerifyConsistency({ firstSize: 6, secondSize: 5, firstRootHex: r, secondRootHex: r, proofHex: [] }), /invalid tree sizes/);
+  assert.throws(() => rfc6962VerifyConsistency({ firstSize: 2, secondSize: 5, firstRootHex: 'abcd', secondRootHex: r, proofHex: [] }), /32 bytes/);
+  assert.throws(() => rfc6962VerifyConsistency({ firstSize: 2, secondSize: 5, firstRootHex: r, secondRootHex: r, proofHex: ['zz'] }), /32 bytes/);
+  assert.throws(() => rfc6962VerifyConsistency({ firstSize: 3, secondSize: 5, firstRootHex: r, secondRootHex: r, proofHex: [] }), /empty proof/);
+});
+
+test('consistency: same size demands identical roots — a split view fails', () => {
+  const D = Array.from({ length: 9 }, (_, i) => nLeafC(i));
+  const root = mthC(D).toString('hex');
+  assert.equal(rfc6962VerifyConsistency({ firstSize: 9, secondSize: 9, firstRootHex: root, secondRootHex: root, proofHex: [] }), true);
+  const other = mthC(D.slice(0, 8)).toString('hex');
+  assert.throws(() => rfc6962VerifyConsistency({ firstSize: 9, secondSize: 9, firstRootHex: root, secondRootHex: other, proofHex: [] }), /split-view/i);
+  assert.throws(() => rfc6962VerifyConsistency({ firstSize: 9, secondSize: 9, firstRootHex: root, secondRootHex: root, proofHex: ['aa'.repeat(32)] }), /must be empty/);
+});
+
+test('consistency: body is deterministic, REPORTED-labeled, single-observer limit stated', () => {
+  const args = {
+    origin: 'rekor.sigstore.dev - 1193050959916656506',
+    prev: { treeSize: 10, rootHash: 'aa'.repeat(32), receiptFile: 'witness_0001_1.receipt.json', receiptSha256: 'bb'.repeat(32) },
+    next: { treeSize: 20, rootHash: 'cc'.repeat(32), receiptFile: 'witness_0002_2.receipt.json', receiptSha256: 'dd'.repeat(32) },
+    proofHashes: ['ee'.repeat(32)],
+    nowIso: 'T',
+  };
+  const a = buildConsistencyBody(args);
+  const b = buildConsistencyBody(JSON.parse(JSON.stringify(args)));
+  assert.equal(canonicalize(a), canonicalize(b));
+  assert.equal(a.kind, 'szl-quant-witness-consistency');
+  assert.equal(a.labels.proof, 'REPORTED');
+  assert.ok(a.limits.some((l) => l.includes('a single observer, not cross-witness gossip')));
+  assert.ok(CONSISTENCY_FILE_RE.test(consistencyFileName(10, 20, 123)));
+});
+
+test('consistency: targets pair adjacent unique sizes per origin and respect coverage', () => {
+  const cp = (o, s, r) => ({ origin: o, treeSize: s, rootHash: r, receiptFile: `w${s}`, receiptSha256: 'f'.repeat(64) });
+  assert.deepEqual(consistencyTargets({ checkpoints: [], covered: [] }), []);
+  assert.deepEqual(consistencyTargets({ checkpoints: [cp('o', 5, 'a')], covered: [] }), []);
+  const t1 = consistencyTargets({ checkpoints: [cp('o', 9, 'c'), cp('o', 5, 'a'), cp('o', 7, 'b')], covered: [] });
+  assert.deepEqual(t1.map((t) => [t.prev.treeSize, t.next.treeSize]), [[5, 7], [7, 9]]);
+  const t2 = consistencyTargets({ checkpoints: [cp('o', 5, 'a'), cp('o', 7, 'b'), cp('o', 9, 'c')], covered: [{ origin: 'o', prevTreeSize: 5, nextTreeSize: 7 }] });
+  assert.deepEqual(t2.map((t) => [t.prev.treeSize, t.next.treeSize]), [[7, 9]]);
+  const t3 = consistencyTargets({ checkpoints: [cp('o', 5, 'a'), cp('o', 5, 'a2'), cp('o', 8, 'b')], covered: [] });
+  assert.deepEqual(t3.map((t) => [t.prev.treeSize, t.next.treeSize]), [[5, 8]]);
+  assert.deepEqual(consistencyTargets({ checkpoints: [cp('o1', 5, 'a'), cp('o2', 8, 'b')], covered: [] }), []);
+});

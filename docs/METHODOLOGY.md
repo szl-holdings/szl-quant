@@ -208,3 +208,25 @@ integratedTime, which for backfill is later than sealing. Stated
 limit: inclusion is proven against the checkpoint captured at anchor
 time; checkpoint-to-checkpoint consistency (gossip/witness cosigning)
 is not verified offline here.
+
+### Checkpoint consistency, replayed offline (external witness, generation 3)
+
+An inclusion proof pins one entry into one signed tree head; it says
+nothing about whether the log later rewrote that history. Generation-3
+**consistency receipts** close that gap for the engine's own observation
+window: for every adjacent pair of captured checkpoints (same shard,
+sizes ascending), the engine fetches the RFC 6962 consistency proof and
+**replays it locally before signing** — the earlier signed root plus the
+proof hashes must reproduce the later signed root exactly
+(§2.1.4.2 algorithm; no 32-bit bitwise ops, since Rekor tree sizes will
+cross 2^31). The response's own rootHash field reflects proof-generation
+time, not lastSize — verified empirically — so it is deliberately
+ignored; only the replay against the two pinned-key-signed checkpoints
+counts. The verifier repeats the replay offline via a self-contained
+mirror, binds each consistency receipt to its two endpoint witness
+receipts by file sha256, and flags two verified checkpoints at the same
+tree size with different roots as split-view evidence. Cross-checked
+in-test against an independent naive RFC 6962 generator over every
+(m, n) pair up to 17 leaves. Stated limit: this proves append-only
+growth between checkpoints THIS engine captured — a single observer,
+not cross-witness gossip; unproven edges are counted in the open.

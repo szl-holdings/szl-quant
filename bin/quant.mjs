@@ -24,8 +24,8 @@ import { ensureIdentity, loadPublicKeyFromSpkiBase64 } from '../src/keys.mjs';
 import { verifyEnvelope } from '../src/dsse.mjs';
 import { verifySignalEnvelopes, buildTrackRecord, HORIZONS_DAYS } from '../src/track.mjs';
 import { buildRefusalsBody, decisionForRefusals, REFUSALS_FILE_RE } from '../src/refusals.mjs';
-import { buildRekordProposal, buildWitnessBody, witnessFileName, witnessTargets, WITNESS_FILE_RE, REKOR_SERVER } from '../src/witness.mjs';
-import { sign as rawEdSign } from 'node:crypto';
+import { buildRekordProposal, buildWitnessBody, witnessFileName, witnessTargets, WITNESS_FILE_RE, REKOR_SERVER, buildConsistencyBody, consistencyTargets, consistencyFileName, rfc6962VerifyConsistency, parseCheckpoint, CONSISTENCY_FILE_RE } from '../src/witness.mjs';
+import { sign as rawEdSign, createHash } from 'node:crypto';
 import { mkdirSync as ensureDirSync } from 'node:fs';
 import { scanLedgerForChain, buildChainBody } from '../src/chain.mjs';
 import { scanLedgerForBook, buildBookBody, decisionForBook } from '../src/book.mjs';
@@ -406,17 +406,98 @@ async function cmdWitness() {
     console.log(all
       ? 'witness: every chain link already carries a proof-bearing anchor — honest no-op'
       : `witness: chain head seq ${chains[chains.length - 1].seq} already anchored — honest no-op`);
+  } else {
+    let anchored = 0;
+    let gaps = 0;
+    for (const link of targets) {
+      const ok = await anchorOneLink({ link, ledgerDir, witnessDir, keys });
+      if (ok) anchored += 1; else gaps += 1;
+    }
+    if (targets.length > 1 || gaps > 0) {
+      console.log(`witness: anchored ${anchored}/${targets.length} link(s)` + (gaps > 0 ? ` — ${gaps} gap(s) stay counted in the open (rekor trouble); absence is honest` : ''));
+    }
+  }
+  await consistencyPass({ witnessDir, keys });
+}
+
+/** Generation 3: link every adjacent pair of captured checkpoints with an
+ *  RFC 6962 consistency proof — proven append-only growth, single
+ *  observer, no gossip pretense. Fail-soft per edge: a missing proof is
+ *  an honest counted gap, never an invented receipt. */
+async function consistencyPass({ witnessDir, keys }) {
+  const checkpoints = [];
+  const covered = [];
+  for (const n of readdirSync(witnessDir)) {
+    try {
+      if (WITNESS_FILE_RE.test(n)) {
+        const bytes = readFileSync(join(witnessDir, n));
+        const b = JSON.parse(Buffer.from(JSON.parse(bytes.toString('utf8')).payload, 'base64').toString('utf8')).predicate.summary;
+        const ip = b.rekor?.inclusionProof;
+        if (!ip) continue; // generation-1 SET-only receipt: no checkpoint to link
+        const cp = parseCheckpoint(ip.checkpoint);
+        checkpoints.push({ origin: cp.origin, treeSize: ip.treeSize, rootHash: ip.rootHash, receiptFile: n, receiptSha256: createHash('sha256').update(bytes).digest('hex') });
+      } else if (CONSISTENCY_FILE_RE.test(n)) {
+        const b = JSON.parse(Buffer.from(JSON.parse(readFileSync(join(witnessDir, n), 'utf8')).payload, 'base64').toString('utf8')).predicate.summary;
+        covered.push({ origin: b.origin, prevTreeSize: b.prev.treeSize, nextTreeSize: b.next.treeSize });
+      }
+    } catch { /* unreadable receipts fail loudly in verify, not here */ }
+  }
+  const targets = consistencyTargets({ checkpoints, covered });
+  if (!targets.length) {
+    if (checkpoints.length > 1) console.log('witness: checkpoint consistency chain already complete — honest no-op');
     return;
   }
-  let anchored = 0;
+  let written = 0;
   let gaps = 0;
-  for (const link of targets) {
-    const ok = await anchorOneLink({ link, ledgerDir, witnessDir, keys });
-    if (ok) anchored += 1; else gaps += 1;
+  for (const t of targets) {
+    const ok = await proveOneEdge({ t, witnessDir, keys });
+    if (ok) written += 1; else gaps += 1;
   }
-  if (targets.length > 1 || gaps > 0) {
-    console.log(`witness: anchored ${anchored}/${targets.length} link(s)` + (gaps > 0 ? ` — ${gaps} gap(s) stay counted in the open (rekor trouble); absence is honest` : ''));
+  console.log(`witness: consistency edges proven ${written}/${targets.length}` + (gaps > 0 ? ` — ${gaps} unproven edge(s) stay counted in the open; absence is honest` : ' — every adjacent checkpoint pair is linked'));
+}
+
+/** Prove ONE adjacent checkpoint pair append-only. The proof is replayed
+ *  locally BEFORE signing — this engine never receipts a claim it has not
+ *  itself verified offline. */
+async function proveOneEdge({ t, witnessDir, keys }) {
+  const treeID = t.origin.split(' - ')[1];
+  let hashes = null;
+  try {
+    const url = `${REKOR_SERVER}/api/v1/log/proof?firstSize=${t.prev.treeSize}&lastSize=${t.next.treeSize}&treeID=${treeID}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(30000) });
+    if (!res.ok) {
+      console.log(`witness UNAVAILABLE (consistency ${t.prev.treeSize} -> ${t.next.treeSize}) — rekor HTTP ${res.status} — no receipt written (absence is honest)`);
+      return false;
+    }
+    const p = await res.json();
+    if (!Array.isArray(p.hashes)) throw new Error('response missing hashes');
+    // NOTE: the response's rootHash field reflects proof-GENERATION time,
+    // not lastSize (verified empirically) — it is deliberately ignored.
+    // The only check that matters is the offline replay below, against
+    // the two roots this engine holds in SIGNED checkpoints.
+    hashes = p.hashes;
+  } catch (e) {
+    console.log(`witness UNAVAILABLE (consistency ${t.prev.treeSize} -> ${t.next.treeSize}) — rekor unreachable (${e.message}) — no receipt written (absence is honest)`);
+    return false;
   }
+  try {
+    rfc6962VerifyConsistency({ firstSize: t.prev.treeSize, secondSize: t.next.treeSize, firstRootHex: t.prev.rootHash, secondRootHex: t.next.rootHash, proofHex: hashes });
+  } catch (e) {
+    console.log(`witness UNAVAILABLE (consistency ${t.prev.treeSize} -> ${t.next.treeSize}) — fetched proof does NOT verify (${e.message}) — no receipt written`);
+    return false;
+  }
+  const body = buildConsistencyBody({ origin: t.origin, prev: t.prev, next: t.next, proofHashes: hashes, nowIso: new Date().toISOString() });
+  const { envelope } = signReceipt({
+    predicateType: PREDICATE.witness,
+    subjectName: `szl-quant/witness/consistency-${t.prev.treeSize}-${t.next.treeSize}`,
+    subjectBody: body,
+    predicate: { summary: body },
+    privateKey: keys.privateKey, publicKey: keys.publicKey,
+  });
+  const file = join(witnessDir, consistencyFileName(t.prev.treeSize, t.next.treeSize, Date.now()));
+  writeFileSync(file, JSON.stringify(envelope, null, 2) + '\n');
+  console.log(`witness: log consistency PROVEN ${t.prev.treeSize} -> ${t.next.treeSize} (${hashes.length} proof hashes, replayed offline before signing) [REPORTED] → ${file}`);
+  return true;
 }
 
 /** Anchor ONE chain link in Rekor. Fail-soft: any Rekor problem is an
