@@ -188,3 +188,23 @@ and verifies the SET — zero network. Limits, stated plainly: only
 witnessed heads are protected and outage gaps are counted in the open;
 the SET proves acceptance at integratedTime, not Merkle inclusion (an
 online check against the signed tree head can do that independently).
+
+### Merkle inclusion, replayed offline (external witness, generation 2)
+
+The SET proves Rekor *accepted* an entry. Generation-2 witness receipts
+go further and capture the **RFC 6962 inclusion proof** returned at
+anchor time: the audit path (sibling hashes), the shard-tree leaf index
+and size, and the **checkpoint** — Rekor's signed note over the tree
+root. The verifier replays all of it with zero network and zero trust
+in the engine's own code (self-contained mirrors): recompute the leaf
+hash from the entry bytes (`sha256(0x00 || body)`), walk the path with
+domain-separated node hashing (`sha256(0x01 || l || r)`) enforcing
+exact path consumption, require the computed root to equal the
+checkpoint's root, and verify the checkpoint's ECDSA signed note
+against the pinned `keys/rekor_pubkey.pem` (4-byte key hint must match
+`sha256(SPKI)[0..4]`). Backfilled links (`witness --all`) are labeled
+what they are: the anchor proves existence **no later than**
+integratedTime, which for backfill is later than sealing. Stated
+limit: inclusion is proven against the checkpoint captured at anchor
+time; checkpoint-to-checkpoint consistency (gossip/witness cosigning)
+is not verified offline here.

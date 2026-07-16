@@ -11,10 +11,14 @@
  * discoverable by this engine's public key.
  *
  * Doctrine: Rekor's response is REPORTED (an external service's
- * statement). What makes it usable offline is the SET — Rekor's own
- * ECDSA signature over {body, integratedTime, logID, logIndex} —
- * verifiable against the pinned Rekor public key with zero network.
- * The witness receipt stores everything needed for that offline replay.
+ * statement). What makes it usable offline:
+ * - the SET — Rekor's ECDSA signature over {body, integratedTime,
+ *   logID, logIndex} — replayable against the pinned Rekor public key;
+ * - the INCLUSION PROOF — an RFC 6962 Merkle audit path from this
+ *   entry's leaf to a signed tree head (checkpoint). The verifier
+ *   recomputes the leaf hash from the entry bytes, walks the path to
+ *   the root, and checks the checkpoint's signed note against the same
+ *   pinned key. Zero network.
  *
  * Entry type is `rekord` (full content), not `hashedrekord`: PureEdDSA
  * signs the raw message, so Rekor can only server-side-verify an ed25519
@@ -24,9 +28,13 @@
  * HONEST LIMITS (stated in every receipt):
  * - Only witnessed heads are protected; coverage gaps (Rekor outages)
  *   are counted in the open, never papered over.
- * - SET proves Rekor ACCEPTED the entry at integratedTime; Merkle
- *   inclusion against a signed tree head is NOT verified offline here.
+ * - Inclusion is proven against the checkpoint captured at anchor time,
+ *   not against the log's current tree head — checkpoint-to-checkpoint
+ *   consistency is not verified offline here.
+ * - An anchor proves the head's bytes existed no later than
+ *   integratedTime; for backfilled links that is later than sealing.
  */
+import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import { canonicalBytes } from './canonical-json.mjs';
 
 export const WITNESS_FILE_RE = /^witness_\d{4}_\d+\.receipt\.json$/;
@@ -80,9 +88,141 @@ export function extractRekordFields(entryBodyBase64) {
   };
 }
 
+// ── RFC 6962 Merkle inclusion, recomputed from first principles ──────────
+// The leaf is the canonicalized entry body as stored by the log; hashing
+// is domain-separated: leaf = sha256(0x00 || bytes), node = sha256(0x01
+// || left || right). No shortcuts: the path must consume EXACTLY its
+// sibling list and land EXACTLY on the claimed root, or the proof fails.
+
+const sha256 = (buf) => createHash('sha256').update(buf).digest();
+
+export function rfc6962LeafHash(bytes) {
+  return sha256(Buffer.concat([Buffer.from([0x00]), Buffer.from(bytes)]));
+}
+
+export function rfc6962NodeHash(left, right) {
+  return sha256(Buffer.concat([Buffer.from([0x01]), left, right]));
+}
+
+/**
+ * Walk an RFC 6962 audit path from a leaf to the tree root.
+ * Throws on any structural violation (fail closed): index out of range,
+ * path too short, or unconsumed siblings.
+ */
+export function rfc6962Root({ leafIndex, treeSize, leafHash, pathHex }) {
+  if (!Number.isInteger(leafIndex) || !Number.isInteger(treeSize) || leafIndex < 0 || treeSize < 1 || leafIndex >= treeSize) {
+    throw new Error(`inclusion proof rejected: leafIndex ${leafIndex} outside tree of size ${treeSize}`);
+  }
+  const path = (pathHex ?? []).map((h) => {
+    const b = Buffer.from(String(h), 'hex');
+    if (b.length !== 32) throw new Error('inclusion proof rejected: sibling hash is not 32 bytes');
+    return b;
+  });
+  let hash = Buffer.from(leafHash);
+  let idx = leafIndex;
+  let last = treeSize - 1;
+  let used = 0;
+  while (last > 0) {
+    if (idx % 2 === 1) {
+      if (used >= path.length) throw new Error('inclusion proof rejected: audit path too short');
+      hash = rfc6962NodeHash(path[used++], hash);
+    } else if (idx < last) {
+      if (used >= path.length) throw new Error('inclusion proof rejected: audit path too short');
+      hash = rfc6962NodeHash(hash, path[used++]);
+    }
+    idx = Math.floor(idx / 2);
+    last = Math.floor(last / 2);
+  }
+  if (used !== path.length) throw new Error(`inclusion proof rejected: ${path.length - used} unconsumed sibling hash(es)`);
+  return hash;
+}
+
+/**
+ * Parse a Rekor checkpoint (signed note). Strict: origin line, decimal
+ * tree size, base64 root hash, blank separator, then signature lines of
+ * the form "— <name> <base64(4-byte key hint || DER sig)>". Throws on
+ * any malformation — a checkpoint we cannot parse is a checkpoint we
+ * refuse to trust.
+ */
+export function parseCheckpoint(text) {
+  if (typeof text !== 'string') throw new Error('checkpoint rejected: not a string');
+  const sep = text.indexOf('\n\n');
+  if (sep < 0) throw new Error('checkpoint rejected: no blank-line separator');
+  const noteBody = text.slice(0, sep + 1); // through the newline ending the root-hash line — the EXACT signed bytes
+  const bodyLines = noteBody.split('\n');
+  if (bodyLines.length < 4) throw new Error('checkpoint rejected: note body too short');
+  const origin = bodyLines[0];
+  if (!/^\S+ - \d+$/.test(origin)) throw new Error('checkpoint rejected: malformed origin line');
+  if (!/^\d+$/.test(bodyLines[1])) throw new Error('checkpoint rejected: malformed tree-size line');
+  const treeSize = Number(bodyLines[1]);
+  if (!Number.isSafeInteger(treeSize) || treeSize < 1) throw new Error('checkpoint rejected: tree size out of range');
+  const rootHash = Buffer.from(bodyLines[2], 'base64');
+  if (rootHash.length !== 32 || rootHash.toString('base64') !== bodyLines[2]) throw new Error('checkpoint rejected: root hash is not canonical 32-byte base64');
+  const sigs = [];
+  for (const line of text.slice(sep + 2).split('\n')) {
+    if (!line) continue;
+    const m = line.match(/^\u2014 (\S+) (\S+)$/);
+    if (!m) throw new Error('checkpoint rejected: malformed signature line');
+    const raw = Buffer.from(m[2], 'base64');
+    if (raw.length < 5) throw new Error('checkpoint rejected: signature too short');
+    sigs.push({ name: m[1], keyHintHex: raw.slice(0, 4).toString('hex'), signature: raw.slice(4) });
+  }
+  if (sigs.length === 0) throw new Error('checkpoint rejected: no signature lines');
+  return { origin, treeSize, rootHashHex: rootHash.toString('hex'), noteBody, sigs };
+}
+
+/**
+ * Verify a checkpoint's signed note against a pinned log public key.
+ * The signature's 4-byte key hint must equal sha256(SPKI)[0..4] of the
+ * pinned key AND the ECDSA signature must verify over the note body.
+ * Returns { ok, reason?, treeSize, rootHashHex, origin }.
+ */
+export function verifyCheckpoint(text, logPublicKeyPem) {
+  let cp;
+  try { cp = parseCheckpoint(text); } catch (e) { return { ok: false, reason: e.message }; }
+  let key;
+  try { key = createPublicKey(logPublicKeyPem); } catch (e) { return { ok: false, reason: `pinned log key unusable: ${e.message}` }; }
+  const hint = sha256(key.export({ type: 'spki', format: 'der' })).slice(0, 4).toString('hex');
+  const candidates = cp.sigs.filter((s) => s.keyHintHex === hint);
+  if (candidates.length === 0) return { ok: false, reason: `no checkpoint signature carries the pinned key's hint ${hint}` };
+  for (const s of candidates) {
+    try {
+      if (cryptoVerify('sha256', Buffer.from(cp.noteBody, 'utf8'), key, s.signature)) {
+        return { ok: true, treeSize: cp.treeSize, rootHashHex: cp.rootHashHex, origin: cp.origin };
+      }
+    } catch { /* try next candidate; fail closed below */ }
+  }
+  return { ok: false, reason: 'checkpoint signature INVALID over the signed note body' };
+}
+
+/**
+ * Full offline inclusion check: entry bytes → leaf hash → audit path →
+ * root, which must equal BOTH the proof's claimed root and the signed
+ * checkpoint's root, with matching tree sizes.
+ * Returns { ok, reason? }.
+ */
+export function verifyInclusionProof({ entryBodyBase64, proof, logPublicKeyPem }) {
+  if (!proof || !Number.isInteger(proof.logIndex) || !Number.isInteger(proof.treeSize) || !Array.isArray(proof.hashes) || typeof proof.rootHash !== 'string' || typeof proof.checkpoint !== 'string') {
+    return { ok: false, reason: 'inclusion proof missing required fields' };
+  }
+  const cp = verifyCheckpoint(proof.checkpoint, logPublicKeyPem);
+  if (!cp.ok) return { ok: false, reason: cp.reason };
+  if (cp.treeSize !== proof.treeSize) return { ok: false, reason: `tree size mismatch: proof says ${proof.treeSize}, signed checkpoint says ${cp.treeSize}` };
+  if (cp.rootHashHex !== proof.rootHash) return { ok: false, reason: 'root hash mismatch: proof root differs from the signed checkpoint root' };
+  let computed;
+  try {
+    const leaf = rfc6962LeafHash(Buffer.from(entryBodyBase64, 'base64'));
+    computed = rfc6962Root({ leafIndex: proof.logIndex, treeSize: proof.treeSize, leafHash: leaf, pathHex: proof.hashes });
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+  if (computed.toString('hex') !== cp.rootHashHex) return { ok: false, reason: 'audit path does NOT land on the signed root — entry not proven in this tree' };
+  return { ok: true };
+}
+
 /** Signed witness receipt body (pure; IO and network live in bin/). */
-export function buildWitnessBody({ chain, rekor, nowIso }) {
-  return {
+export function buildWitnessBody({ chain, rekor, inclusion, nowIso }) {
+  const body = {
     kind: 'szl-quant-witness',
     generatedAtIso: nowIso,
     chain: { seq: chain.seq, runDir: chain.runDir, file: chain.file, sha256: chain.sha256 },
@@ -102,7 +242,36 @@ export function buildWitnessBody({ chain, rekor, nowIso }) {
     note: 'external witness: this sealed chain head is anchored in a public append-only transparency log — deleting the ledger does not delete the anchor',
     limits: [
       'protects only witnessed heads; coverage gaps (rekor outages) are counted, not hidden',
-      'SET proves rekor accepted the entry at integratedTime; Merkle inclusion proof is not verified offline here',
+      'an anchor proves the head bytes existed no later than integratedTime — for backfilled links that is later than sealing',
     ],
   };
+  if (inclusion) {
+    body.rekor.inclusionProof = {
+      logIndex: inclusion.logIndex,       // leaf index within the active shard tree (NOT the global logIndex)
+      treeSize: inclusion.treeSize,
+      rootHash: inclusion.rootHash,
+      hashes: [...inclusion.hashes],
+      checkpoint: inclusion.checkpoint,
+    };
+    body.limits.push('inclusion is proven against the checkpoint captured at anchor time, not the log current tree head — checkpoint-to-checkpoint consistency is not verified offline');
+  } else {
+    body.limits.push('SET proves rekor accepted the entry at integratedTime; Merkle inclusion proof is not verified offline here');
+  }
+  return body;
+}
+
+/**
+ * Which chain links still need a proof-bearing witness receipt?
+ * A link is DONE only if some receipt for its seq carries an inclusion
+ * proof; SET-only receipts (generation 1) stay valid but do not satisfy
+ * --all. Pure: pass in the seqs found on disk.
+ */
+export function witnessTargets({ chainLinks, receipts, all }) {
+  const proven = new Set(receipts.filter((r) => r.hasInclusionProof).map((r) => r.seq));
+  const anchored = new Set(receipts.map((r) => r.seq));
+  const sorted = [...chainLinks].sort((a, b) => a.seq - b.seq);
+  if (all) return sorted.filter((l) => !proven.has(l.seq));
+  const head = sorted[sorted.length - 1];
+  if (!head) return [];
+  return anchored.has(head.seq) ? [] : [head];
 }
