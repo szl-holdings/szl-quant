@@ -230,3 +230,30 @@ in-test against an independent naive RFC 6962 generator over every
 (m, n) pair up to 17 leaves. Stated limit: this proves append-only
 growth between checkpoints THIS engine captured — a single observer,
 not cross-witness gossip; unproven edges are counted in the open.
+
+### Second witness — RFC 3161 trusted timestamps (generation 4)
+
+Generations 1–3 all watch the same log from the same vantage point. The
+stated residual limit — a single observer, no cross-witness gossip — is
+narrowed by countersigning each head-anchor witness receipt with an
+**RFC 3161 timestamp authority**, a trust root entirely outside
+Sigstore. The engine builds the TimeStampReq itself (sha256 imprint of
+the exact receipt bytes, fresh nonce, `certReq=TRUE`), then verifies the
+returned token **offline before signing anything**: CMS signature by the
+signing certificate, id-kp-timeStamping EKU, certificate chain walking
+byte-equal onto a pinned anchor, certificate validity at genTime,
+imprint match, and nonce echo compared as integer values (DER echoes are
+minimal integers, so raw-byte comparison would misfire). Only then is a
+REPORTED receipt signed, embedding the full token so the independent
+verifier can repeat every check with zero network against the anchors
+committed in `keys/tsa/`.
+
+Trust is stated, not implied: the anchors are **pin-on-first-use**
+(captured 2026-07-16, manifest in `keys/tsa/PINS.md`), not a WebPKI
+resolution — the claim is "an authority holding this pinned root vouched
+these bytes existed no later than genTime", nothing stronger. Backfilled
+receipts say so. DigiCert is tried first, FreeTSA as fallback; if no
+authority yields a token that survives offline verification, the engine
+refuses to receipt it and the gap is counted in the open, retried next
+run. This adds a disjoint trust root, not a second vantage point; both
+witnesses are still read by this engine alone.
