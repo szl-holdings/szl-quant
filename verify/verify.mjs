@@ -483,12 +483,95 @@ function verifyRefusals(ledgerDir, pinnedKey) {
   return false;
 }
 
+// ---- external witness (self-contained mirror of src/witness.mjs rules) ----
+const WITNESS_RE = /^witness_\d{4}_\d+\.receipt\.json$/;
+const CHAINFILE_RE = /^chain_(\d{4})\.receipt\.json$/;
+
+function rekordFieldsMirror(entryBodyBase64) {
+  let e;
+  try { e = JSON.parse(Buffer.from(entryBodyBase64, 'base64').toString('utf8')); } catch { return null; }
+  if (e?.kind !== 'rekord') return null;
+  const hash = e.spec?.data?.hash;
+  const sig = e.spec?.signature;
+  if (hash?.algorithm !== 'sha256' || !hash?.value || !sig?.content || !sig?.publicKey?.content) return null;
+  return { dataSha256: hash.value, signatureBase64: sig.content, publicKeyPemBase64: sig.publicKey.content };
+}
+
+function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
+  if (!pinnedKey) { console.log('WITNESS FAIL: --witness requires --pubkey (pinned engine key) — refusing TOFU here'); return false; }
+  let rekorPub;
+  try { rekorPub = createPublicKey(readFileSync(rekorPubPath, 'utf8')); }
+  catch (e) { console.log(`WITNESS FAIL: cannot load pinned rekor pubkey ${rekorPubPath}: ${e.message}`); return false; }
+  const wDir = join(rootDir, 'witness');
+  const lDir = join(rootDir, 'ledger');
+  let names = [];
+  try { names = readdirSync(wDir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).filter((n) => WITNESS_RE.test(n)).sort(); } catch { /* absent dir handled below */ }
+  if (names.length === 0) { console.log('WITNESS FAIL: no witness receipts under ' + wDir); return false; }
+  const problems = [];
+  const anchoredSeqs = new Set();
+  let latest = null;
+  for (const n of names) {
+    const full = join(wDir, n);
+    const r = verifyFile(full, pinnedKey);
+    if (!r.ok) { problems.push(`${n}: DSSE verification failed: ${r.fails.join('; ')}`); continue; }
+    let body = null;
+    try { body = JSON.parse(Buffer.from(JSON.parse(readFileSync(full, 'utf8')).payload, 'base64').toString('utf8'))?.predicate?.summary ?? null; } catch { /* handled */ }
+    if (!body || body.kind !== 'szl-quant-witness') { problems.push(`${n}: unreadable witness body`); continue; }
+    // 1) the witnessed chain link must still exist on disk, byte-identical
+    let cbytes = null;
+    try { cbytes = readFileSync(join(lDir, body.chain.runDir, body.chain.file)); }
+    catch { problems.push(`${n}: witnessed chain link ${body.chain.runDir}/${body.chain.file} MISSING from ledger — truncation evidence`); }
+    if (!cbytes) continue;
+    const sha = sha256Hex(cbytes);
+    if (sha !== body.chain.sha256) problems.push(`${n}: chain link bytes CHANGED after witnessing (sha256 mismatch)`);
+    // 2) the rekor entry must anchor exactly these bytes with the pinned engine key
+    const f = rekordFieldsMirror(body.rekor?.entryBodyBase64 ?? '');
+    if (!f) { problems.push(`${n}: rekor entry body unreadable or not a rekord entry`); continue; }
+    if (f.dataSha256 !== sha) problems.push(`${n}: rekor entry anchors DIFFERENT bytes (hash mismatch)`);
+    try {
+      const entryPub = createPublicKey(Buffer.from(f.publicKeyPemBase64, 'base64').toString('utf8'));
+      const samePin = entryPub.export({ type: 'spki', format: 'der' }).equals(pinnedKey.export({ type: 'spki', format: 'der' }));
+      if (!samePin) problems.push(`${n}: rekor entry public key is NOT the pinned engine key`);
+      if (!edVerify(null, cbytes, entryPub, Buffer.from(f.signatureBase64, 'base64'))) problems.push(`${n}: artifact signature in rekor entry INVALID over chain bytes`);
+    } catch (e) { problems.push(`${n}: rekor entry public key unreadable: ${e.message}`); }
+    // 3) SET: rekor's own signature over {body, integratedTime, logID, logIndex}
+    try {
+      const msg = Buffer.from(canonicalize({ body: body.rekor.entryBodyBase64, integratedTime: body.rekor.integratedTime, logID: body.rekor.logID, logIndex: body.rekor.logIndex }), 'utf8');
+      if (!edVerify('sha256', msg, rekorPub, Buffer.from(body.rekor.signedEntryTimestampBase64, 'base64'))) {
+        problems.push(`${n}: rekor SET INVALID — no offline proof rekor accepted this entry`);
+      }
+    } catch (e) { problems.push(`${n}: SET check failed: ${e.message}`); }
+    if (Number.isInteger(body.chain?.seq)) {
+      anchoredSeqs.add(body.chain.seq);
+      if (!latest || body.chain.seq > latest.chain.seq) latest = body;
+    }
+  }
+  // coverage vs. chain links actually present (gaps counted, not hidden)
+  const linkSeqs = new Set();
+  try {
+    for (const d of readdirSync(lDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)) {
+      for (const f of readdirSync(join(lDir, d))) { const m = f.match(CHAINFILE_RE); if (m) linkSeqs.add(parseInt(m[1], 10)); }
+    }
+  } catch { /* ledger dir problems surface via --chain */ }
+  for (const p of problems) console.log(`      WITNESS FAIL: ${p}`);
+  if (problems.length === 0 && latest) {
+    const t = new Date(latest.rekor.integratedTime * 1000).toISOString();
+    console.log(`WITNESS OK  anchors=${names.length}  heads anchored=${anchoredSeqs.size}/${linkSeqs.size} chain links  latest: seq ${latest.chain.seq} \u2192 rekor logIndex ${latest.rekor.logIndex} (integrated ${t}) [REPORTED, SET verified offline]`);
+    console.log('      note: anchored heads live in a public append-only log — deleting this ledger does not delete the anchors; unwitnessed links are counted above, not hidden');
+    return true;
+  }
+  console.log('WITNESS BROKEN');
+  return false;
+}
+
 // ---- main ----
 const args = process.argv.slice(2);
 let pinnedKey = null;
 let chainDir = null;
 let bookDir = null;
 let refusalsDir = null;
+let witnessRoot = null;
+let rekorPubPath = 'keys/rekor_pubkey.pem';
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--pubkey') {
@@ -505,10 +588,14 @@ for (let i = 0; i < args.length; i++) {
     bookDir = args[++i];
   } else if (args[i] === '--refusals') {
     refusalsDir = args[++i];
+  } else if (args[i] === '--witness') {
+    witnessRoot = args[++i];
+  } else if (args[i] === '--rekor-pubkey') {
+    rekorPubPath = args[++i];
   } else files.push(args[i]);
 }
-if (files.length === 0 && !chainDir && !bookDir && !refusalsDir) {
-  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] (--dir receipts/ | --chain ledger/ | --book ledger/ | --refusals ledger/ | receipt.json ...)');
+if (files.length === 0 && !chainDir && !bookDir && !refusalsDir && !witnessRoot) {
+  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] [--rekor-pubkey keys/rekor_pubkey.pem] (--dir receipts/ | --chain ledger/ | --book ledger/ | --refusals ledger/ | --witness rootdir/ | receipt.json ...)');
   process.exit(2);
 }
 let allOk = true;
@@ -523,4 +610,5 @@ if (files.length > 0) console.log(allOk ? `\nAll ${files.length} receipt(s) veri
 if (chainDir) allOk = verifyChain(chainDir, pinnedKey) && allOk;
 if (bookDir) allOk = verifyBook(bookDir, pinnedKey) && allOk;
 if (refusalsDir) allOk = verifyRefusals(refusalsDir, pinnedKey) && allOk;
+if (witnessRoot) allOk = verifyWitness(witnessRoot, pinnedKey, rekorPubPath) && allOk;
 process.exit(allOk ? 0 : 1);

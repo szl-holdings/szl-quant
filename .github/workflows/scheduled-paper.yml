@@ -84,10 +84,17 @@ jobs:
           # then verify this run dir, walk the full chain, AND replay the book
           # independently — the publish fails closed if any check fails.
           node "$GITHUB_WORKSPACE/bin/quant.mjs" chain --ledger ledger --dest "$(basename "$DEST")"
+          # Anchor the new chain head in the Rekor public transparency log (fail-soft: an outage is an honest, counted gap).
+          node "$GITHUB_WORKSPACE/bin/quant.mjs" witness --ledger ledger --witness-dir witness
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --dir "$DEST"
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --chain ledger
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --book ledger
           node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --refusals ledger
+          if ls witness/witness_*.receipt.json >/dev/null 2>&1; then
+            node "$GITHUB_WORKSPACE/verify/verify.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --rekor-pubkey "$GITHUB_WORKSPACE/keys/rekor_pubkey.pem" --witness .
+          else
+            echo "witness: no anchors yet (rekor unreachable so far) — an honest gap, stated in the open"
+          fi
           # Regenerate INDEX.md — counts MEASURED from the files actually present.
           node -e '
             const fs = require("node:fs");
@@ -141,6 +148,20 @@ jobs:
                 refusalsLine = `Refusal record (MEASURED): latest run BLOCKED ${h.totals.blocked}/${h.totals.decisions}${h.totals.refusalsByGate.length?" — "+fmt(h.totals.refusalsByGate):""} · lifetime (recorded runs) ${lb}/${ld}${lifeArr.length?" — "+fmt(lifeArr):""} · a refusal is a decision, not an absence · replay: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/\``;
               } catch {}
             }
+            // External-witness headline: newest Rekor anchor + coverage (fail-soft).
+            let witnessLine = "External witness: none yet — no chain head anchored so far (rekor unreachable); the gap is counted, not hidden.";
+            try {
+              const wf = fs.existsSync("witness") ? fs.readdirSync("witness").filter(f => /^witness_\d{4}_\d+\.receipt\.json$/.test(f)) : [];
+              if (wf.length) {
+                const wbodies = wf.map(f => JSON.parse(Buffer.from(JSON.parse(fs.readFileSync("witness/"+f,"utf8")).payload,"base64").toString()).predicate.summary);
+                wbodies.sort((a,b) => a.chain.seq - b.chain.seq);
+                const wh = wbodies[wbodies.length-1];
+                let links = 0;
+                for (const d of dirs) for (const f of fs.readdirSync("ledger/"+d)) if (/^chain_\d{4}\.receipt\.json$/.test(f)) links++;
+                const seqs = new Set(wbodies.map(b => b.chain.seq));
+                witnessLine = `External witness (REPORTED, SET offline-verifiable): chain head seq ${wh.chain.seq} anchored in Rekor — logIndex ${wh.rekor.logIndex}, uuid ${String(wh.rekor.uuid).slice(0,16)}… · heads anchored ${seqs.size}/${links} · an anchored head cannot be silently truncated · check: \`node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .\``;
+              }
+            } catch {}
             // Hash-chain headline from the newest chain receipt (fail-soft).
             let chainLine = "Hash chain: no chain receipt yet.";
             const cfs = [];
@@ -177,6 +198,8 @@ jobs:
               "",
               refusalsLine,
               "",
+              witnessLine,
+              "",
               "| run (UTC) | receipts |",
               "|---|---|",
               ...rows,
@@ -189,7 +212,7 @@ jobs:
           # External witness: headline facts also land in the Actions run
           # summary, which lives OUTSIDE the ledger branch — head truncation
           # of the ledger must now also erase run history to go unnoticed.
-          { echo "## szl-quant ledger ${STAMP}"; grep -E '^(Track record|Hash chain|Paper book|Refusal record)' INDEX.md | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY" || true
+          { echo "## szl-quant ledger ${STAMP}"; grep -E '^(Track record|Hash chain|Paper book|Refusal record|External witness)' INDEX.md | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY" || true
           git add -A
           git commit -q -m "ledger: paper session ${STAMP} (run ${GITHUB_RUN_ID})"
           git push -q origin ledger

@@ -168,3 +168,23 @@ and doctrine requires the reasons to be countable on the ledger rather
 than explained away in prose. Limits, stated plainly: the census says
 WHY entries were refused, not whether refusing was right; per-run scope
 only; no performance claim of any kind.
+
+## External witness (REPORTED, offline-verifiable)
+
+The hash chain confesses one limit: deleting the newest link(s) leaves
+no local trace. After each run seals its chain link, the engine anchors
+the head in the Sigstore Rekor public transparency log: the head's exact
+bytes, ed25519-signed, submitted as a full-content `rekord` entry (the
+chain receipt is already public data). Rekor's acceptance — logIndex,
+integratedTime and its own ECDSA signature (the SET) — is stored in a
+signed `witness/witness_*.receipt.json`.
+
+Labels, honestly: the Rekor response is REPORTED (an external service's
+statement). What earns it a place in the verify gate is that the SET
+replays OFFLINE against the Rekor public key pinned in this repo:
+`verify --witness .` recomputes the head's sha256 from disk, checks the
+entry anchors exactly those bytes under exactly the pinned engine key,
+and verifies the SET — zero network. Limits, stated plainly: only
+witnessed heads are protected and outage gaps are counted in the open;
+the SET proves acceptance at integratedTime, not Merkle inclusion (an
+online check against the signed tree head can do that independently).

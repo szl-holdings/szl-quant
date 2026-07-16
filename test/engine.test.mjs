@@ -439,6 +439,59 @@ test('refusals: file-name pattern is strict (no spoofing via lookalike names)', 
   assert.ok(!REFUSALS_FILE_RE.test('refusals_1.receipt.json.bak'));
 });
 
+// ── external witness (rekor anchoring) ─────────────────────────────────────
+import { buildRekordProposal, setMessageBytes, extractRekordFields, buildWitnessBody, witnessFileName, WITNESS_FILE_RE } from '../src/witness.mjs';
+import { sign as edSign, verify as edVerifyRaw } from 'node:crypto';
+
+test('witness: rekord proposal round-trips a real ed25519 signature over the artifact', () => {
+  const kp = generateEngineKeypair();
+  const artifact = Buffer.from('{"chain":"head bytes"}');
+  const sig = edSign(null, artifact, kp.privateKey);
+  const pem = kp.publicKey.export({ type: 'spki', format: 'pem' });
+  const p = buildRekordProposal({ artifactBytes: artifact, signatureBase64: sig.toString('base64'), publicKeyPem: pem });
+  assert.equal(p.kind, 'rekord');
+  assert.equal(p.spec.signature.format, 'x509');
+  const back = Buffer.from(p.spec.data.content, 'base64');
+  assert.ok(back.equals(artifact));
+  assert.ok(edVerifyRaw(null, back, kp.publicKey, Buffer.from(p.spec.signature.content, 'base64')));
+});
+
+test('witness: SET message is RFC8785-canonical with exactly the four rekor fields', () => {
+  const bytes = setMessageBytes({ entryBodyBase64: 'B', integratedTime: 7, logID: 'L', logIndex: 42 });
+  assert.equal(Buffer.from(bytes).toString('utf8'), '{"body":"B","integratedTime":7,"logID":"L","logIndex":42}');
+});
+
+test('witness: extractRekordFields reads canonical entries and fails closed on shape miss', () => {
+  const entry = { apiVersion: '0.0.1', kind: 'rekord', spec: { data: { hash: { algorithm: 'sha256', value: 'ab'.repeat(32) } }, signature: { format: 'x509', content: 'c2ln', publicKey: { content: 'cGVt' } } } };
+  const b64 = Buffer.from(JSON.stringify(entry)).toString('base64');
+  assert.deepEqual(extractRekordFields(b64), { dataSha256: 'ab'.repeat(32), signatureBase64: 'c2ln', publicKeyPemBase64: 'cGVt', format: 'x509' });
+  assert.equal(extractRekordFields(Buffer.from('{"kind":"hashedrekord"}').toString('base64')), null);
+  assert.equal(extractRekordFields(Buffer.from('{"kind":"rekord","spec":{}}').toString('base64')), null);
+  assert.equal(extractRekordFields('not-base64-json'), null);
+});
+
+test('witness: body is deterministic, REPORTED-labeled and states its limits', () => {
+  const args = {
+    chain: { seq: 8, runDir: 'r', file: 'chain_0008.receipt.json', sha256: 'aa'.repeat(32) },
+    rekor: { server: 'https://rekor.sigstore.dev', uuid: 'u', logIndex: 1, logID: 'l', integratedTime: 2, entryBodyBase64: 'e', signedEntryTimestampBase64: 's' },
+    nowIso: 'T',
+  };
+  const a = buildWitnessBody(args);
+  const b = buildWitnessBody(JSON.parse(JSON.stringify(args)));
+  assert.equal(canonicalize(a), canonicalize(b));
+  assert.equal(a.labels.anchor, 'REPORTED');
+  assert.equal(a.limits.length, 2);
+  assert.equal(a.kind, 'szl-quant-witness');
+});
+
+test('witness: file name is seq-padded and the pattern is strict', () => {
+  assert.equal(witnessFileName(9, 123), 'witness_0009_123.receipt.json');
+  assert.ok(WITNESS_FILE_RE.test('witness_0009_123.receipt.json'));
+  assert.ok(!WITNESS_FILE_RE.test('witness_9_123.receipt.json'));
+  assert.ok(!WITNESS_FILE_RE.test('xwitness_0009_123.receipt.json'));
+  assert.ok(!WITNESS_FILE_RE.test('witness_0009_123.receipt.json.bak'));
+});
+
 test('chain: file-name pattern is strict (no spoofing via lookalike names)', () => {
   assert.ok(CHAIN_FILE_RE.test('chain_0001.receipt.json'));
   assert.ok(!CHAIN_FILE_RE.test('chain_1.receipt.json'));

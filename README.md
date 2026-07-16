@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 41 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record
+npm test                      # 46 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -72,6 +72,7 @@ node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/  # walk the tamper-evident hash chain
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --book  ledger/  # REPLAY the stateful paper book
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/  # REPLAY the refusal census
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .         # check Rekor anchors OFFLINE (from the ledger-branch root)
 ```
 
 Feeds down? The engine emits an **honest empty** (`UNAVAILABLE`, zero
@@ -165,6 +166,29 @@ under the 0.55 floor most days — so the conviction gate refuses. That is
 the doctrine working, not a defect, and it is **not** a promise that the
 engine will trade more (or better) as history accumulates.
 
+## External witness — the ledger cannot quietly lose its head
+
+```bash
+node bin/quant.mjs witness --ledger ledger/ --witness-dir witness/   # anchor the newest chain head in Rekor
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .  # replay the anchors offline
+```
+
+The hash chain confesses its one blind spot: deleting the newest link(s)
+leaves no local trace. So after sealing, each run anchors the head's
+exact bytes in the Sigstore **Rekor** public transparency log — an
+append-only log this engine does not operate. Deleting the ledger does
+not delete the anchor, and the entry stays discoverable by this engine's
+public key.
+
+Honesty about trust: the Rekor response is REPORTED. It earns a place in
+the verify gate because the SET (Rekor's own signature over the
+integrated entry) replays **offline** against `keys/rekor_pubkey.pem` —
+the verifier recomputes the head's sha256 from disk, confirms the entry
+anchors exactly those bytes under exactly the pinned engine key, then
+checks the SET with zero network. Limits, plainly: only witnessed heads
+are protected, outage gaps are counted in the open, and the SET proves
+acceptance — Merkle inclusion is not verified offline here.
+
 ## Verifiable track record — the anti-"calls account"
 
 ```bash
@@ -217,6 +241,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/chain.mjs` | tamper-evident hash chain over ledger runs — signed links, genesis backfill, honest truncation limit |
 | `src/book.mjs` | stateful cross-run paper book — signed, prev-hash-linked, verifier-REPLAYABLE transitions (MODELED, paper-only) |
 | `src/refusals.mjs` | refusal record — signed per-run census of verdicts and blocking gates, verifier-replayable (MEASURED counts) |
+| `src/witness.mjs` | external witness — sealed chain heads anchored in the Rekor public transparency log, SET offline-verifiable (REPORTED) |
 | `src/ingest/` | REPORTED feeds — coingecko (primary) · coinbase candles (fallback, USD) · dexscreener live pairs · `history.mjs` resilient chain |
 | `src/receipts.mjs` + `src/dsse.mjs` | in-toto Statement + DSSE envelope (ed25519) |
 | `verify/verify.mjs` | independent verifier (no `src/` imports) |
