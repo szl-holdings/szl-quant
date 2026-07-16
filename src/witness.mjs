@@ -28,9 +28,11 @@
  * HONEST LIMITS (stated in every receipt):
  * - Only witnessed heads are protected; coverage gaps (Rekor outages)
  *   are counted in the open, never papered over.
- * - Inclusion is proven against the checkpoint captured at anchor time,
- *   not against the log's current tree head — checkpoint-to-checkpoint
- *   consistency is not verified offline here.
+ * - Inclusion is proven against the checkpoint captured at anchor time.
+ *   Generation-3 consistency receipts additionally prove each captured
+ *   checkpoint is a prefix of the next (RFC 6962 consistency proofs) —
+ *   append-only growth across the whole observation window, replayed
+ *   offline. Single observer: no cross-witness gossip is claimed.
  * - An anchor proves the head's bytes existed no later than
  *   integratedTime; for backfilled links that is later than sealing.
  */
@@ -274,4 +276,121 @@ export function witnessTargets({ chainLinks, receipts, all }) {
   const head = sorted[sorted.length - 1];
   if (!head) return [];
   return anchored.has(head.seq) ? [] : [head];
+}
+
+// ── RFC 6962 checkpoint CONSISTENCY, recomputed from first principles ────
+// An inclusion proof pins one entry into one signed tree head. A
+// consistency proof goes further: it proves the tree at an EARLIER
+// checkpoint is a strict PREFIX of the tree at a LATER one — the log
+// only appended between the two observations. A log that rewrote or
+// forked history cannot produce a valid proof between two signed roots.
+// NOTE: rekor tree sizes will exceed 2^31, so no 32-bit bitwise ops on
+// sizes — parity via %, halving via Math.floor, power-of-two by division.
+
+export const CONSISTENCY_FILE_RE = /^consistency_\d+-\d+_\d+\.receipt\.json$/;
+
+export function consistencyFileName(firstSize, secondSize, nowMs) {
+  return `consistency_${firstSize}-${secondSize}_${nowMs}.receipt.json`;
+}
+
+function isPowerOfTwo(n) {
+  while (n % 2 === 0 && n > 1) n /= 2;
+  return n === 1;
+}
+
+/**
+ * Verify an RFC 6962 §2.1.4.2 consistency proof. Throws on ANY failure
+ * (fail closed); returns true only when the earlier tree is proven a
+ * prefix of the later tree.
+ */
+export function rfc6962VerifyConsistency({ firstSize, secondSize, firstRootHex, secondRootHex, proofHex }) {
+  if (!Number.isSafeInteger(firstSize) || !Number.isSafeInteger(secondSize) || firstSize < 1 || secondSize < firstSize) {
+    throw new Error(`consistency proof rejected: invalid tree sizes ${firstSize} -> ${secondSize}`);
+  }
+  const first = Buffer.from(String(firstRootHex), 'hex');
+  const second = Buffer.from(String(secondRootHex), 'hex');
+  if (first.length !== 32 || second.length !== 32) throw new Error('consistency proof rejected: root hash is not 32 bytes');
+  const proof = (proofHex ?? []).map((h) => {
+    const b = Buffer.from(String(h), 'hex');
+    if (b.length !== 32) throw new Error('consistency proof rejected: proof hash is not 32 bytes');
+    return b;
+  });
+  if (firstSize === secondSize) {
+    if (proof.length !== 0) throw new Error('consistency proof rejected: same-size proof must be empty');
+    if (!first.equals(second)) throw new Error('consistency proof rejected: same tree size but DIFFERENT roots — split-view evidence');
+    return true;
+  }
+  const items = isPowerOfTwo(firstSize) ? [first, ...proof] : proof;
+  if (items.length === 0) throw new Error('consistency proof rejected: empty proof for a grown tree');
+  let fn = firstSize - 1;
+  let sn = secondSize - 1;
+  while (fn % 2 === 1) { fn = Math.floor(fn / 2); sn = Math.floor(sn / 2); }
+  let fr = items[0];
+  let sr = items[0];
+  for (let i = 1; i < items.length; i++) {
+    if (sn === 0) throw new Error('consistency proof rejected: too many proof hashes');
+    if (fn % 2 === 1 || fn === sn) {
+      fr = rfc6962NodeHash(items[i], fr);
+      sr = rfc6962NodeHash(items[i], sr);
+      while (fn % 2 === 0 && fn !== 0) { fn = Math.floor(fn / 2); sn = Math.floor(sn / 2); }
+    } else {
+      sr = rfc6962NodeHash(sr, items[i]);
+    }
+    fn = Math.floor(fn / 2);
+    sn = Math.floor(sn / 2);
+  }
+  if (!fr.equals(first)) throw new Error('consistency proof rejected: recomputed OLD root differs — the earlier checkpoint is not a prefix of the later tree');
+  if (!sr.equals(second)) throw new Error('consistency proof rejected: recomputed NEW root differs — proof does not land on the later signed root');
+  if (sn !== 0) throw new Error('consistency proof rejected: proof hashes exhausted before reaching the root');
+  return true;
+}
+
+/** Signed consistency receipt body (pure; IO and network live in bin/). */
+export function buildConsistencyBody({ origin, prev, next, proofHashes, nowIso }) {
+  return {
+    kind: 'szl-quant-witness-consistency',
+    generatedAtIso: nowIso,
+    origin,
+    prev: { treeSize: prev.treeSize, rootHash: prev.rootHash, receiptFile: prev.receiptFile, receiptSha256: prev.receiptSha256 },
+    next: { treeSize: next.treeSize, rootHash: next.rootHash, receiptFile: next.receiptFile, receiptSha256: next.receiptSha256 },
+    proofHashes: [...(proofHashes ?? [])],
+    labels: {
+      proof: 'REPORTED',
+      note: 'consistency hashes are an external service statement; they replay offline against the two signed checkpoint roots',
+    },
+    note: 'log consistency: the tree observed at the earlier checkpoint is proven a PREFIX of the tree at the later one — the log only appended between these two observations',
+    limits: [
+      'proves append-only growth between checkpoints THIS engine captured — a single observer, not cross-witness gossip',
+      'meaningful only if both endpoint checkpoints verify against the pinned rekor key — the verifier enforces exactly that',
+    ],
+  };
+}
+
+/**
+ * Which adjacent checkpoint pairs still need a consistency receipt?
+ * Checkpoints are grouped by origin (log shard), deduped by tree size
+ * (first observation wins; same-size disagreement is the verifier's
+ * split-view check), sorted ascending, and paired adjacently. Pure.
+ */
+export function consistencyTargets({ checkpoints, covered }) {
+  const done = new Set((covered ?? []).map((c) => `${c.origin}|${c.prevTreeSize}|${c.nextTreeSize}`));
+  const byOrigin = new Map();
+  for (const cp of checkpoints ?? []) {
+    if (!byOrigin.has(cp.origin)) byOrigin.set(cp.origin, []);
+    byOrigin.get(cp.origin).push(cp);
+  }
+  const targets = [];
+  for (const [origin, list] of byOrigin) {
+    const bySize = new Map();
+    for (const cp of [...list].sort((a, b) => a.treeSize - b.treeSize)) {
+      if (!bySize.has(cp.treeSize)) bySize.set(cp.treeSize, cp);
+    }
+    const uniq = [...bySize.values()];
+    for (let i = 1; i < uniq.length; i++) {
+      if (!done.has(`${origin}|${uniq[i - 1].treeSize}|${uniq[i].treeSize}`)) {
+        targets.push({ origin, prev: uniq[i - 1], next: uniq[i] });
+      }
+    }
+  }
+  return targets;
 }

@@ -538,9 +538,50 @@ function checkpointMirror(text, rekorPub) {
     const raw = Buffer.from(m[1], 'base64');
     if (raw.length < 5 || raw.slice(0, 4).toString('hex') !== hint) continue;
     sawHint = true;
-    try { if (edVerify('sha256', Buffer.from(noteBody, 'utf8'), rekorPub, raw.slice(4))) return { ok: true, treeSize, rootHashHex: root.toString('hex') }; } catch { /* fail closed below */ }
+    try { if (edVerify('sha256', Buffer.from(noteBody, 'utf8'), rekorPub, raw.slice(4))) return { ok: true, treeSize, rootHashHex: root.toString('hex'), origin: lines[0] }; } catch { /* fail closed below */ }
   }
   return { ok: false, reason: sawHint ? 'checkpoint signature INVALID over the signed note' : 'no checkpoint signature carries the pinned rekor key hint' };
+}
+
+const CONS_RE = /^consistency_\d+-\d+_\d+\.receipt\.json$/;
+
+// RFC 6962 (2.1.4.2) consistency verification, self-contained mirror —
+// proves the tree at firstSize is a PREFIX of the tree at secondSize.
+// Sizes exceed 2^31 eventually: no 32-bit bitwise ops, only % and floor.
+function rfcConsistencyMirror(firstSize, secondSize, firstRootHex, secondRootHex, hashesHex) {
+  if (!Number.isSafeInteger(firstSize) || !Number.isSafeInteger(secondSize) || firstSize < 1 || secondSize < firstSize) throw new Error(`consistency proof rejected: invalid tree sizes ${firstSize} -> ${secondSize}`);
+  const first = Buffer.from(String(firstRootHex), 'hex');
+  const second = Buffer.from(String(secondRootHex), 'hex');
+  if (first.length !== 32 || second.length !== 32) throw new Error('consistency proof rejected: root hash is not 32 bytes');
+  const proof = (hashesHex ?? []).map((h) => { const b = Buffer.from(String(h), 'hex'); if (b.length !== 32) throw new Error('consistency proof rejected: proof hash is not 32 bytes'); return b; });
+  if (firstSize === secondSize) {
+    if (proof.length !== 0) throw new Error('consistency proof rejected: same-size proof must be empty');
+    if (!first.equals(second)) throw new Error('consistency proof rejected: same tree size but DIFFERENT roots — split-view evidence');
+    return;
+  }
+  let isPow2 = true; { let n = firstSize; while (n % 2 === 0 && n > 1) n /= 2; isPow2 = n === 1; }
+  const items = isPow2 ? [first, ...proof] : proof;
+  if (items.length === 0) throw new Error('consistency proof rejected: empty proof for a grown tree');
+  let fn = firstSize - 1;
+  let sn = secondSize - 1;
+  while (fn % 2 === 1) { fn = Math.floor(fn / 2); sn = Math.floor(sn / 2); }
+  let fr = items[0];
+  let sr = items[0];
+  for (let i = 1; i < items.length; i++) {
+    if (sn === 0) throw new Error('consistency proof rejected: too many proof hashes');
+    if (fn % 2 === 1 || fn === sn) {
+      fr = rfcNodeMirror(items[i], fr);
+      sr = rfcNodeMirror(items[i], sr);
+      while (fn % 2 === 0 && fn !== 0) { fn = Math.floor(fn / 2); sn = Math.floor(sn / 2); }
+    } else {
+      sr = rfcNodeMirror(sr, items[i]);
+    }
+    fn = Math.floor(fn / 2);
+    sn = Math.floor(sn / 2);
+  }
+  if (!fr.equals(first)) throw new Error('consistency proof rejected: recomputed OLD root differs — the earlier checkpoint is not a prefix of the later tree');
+  if (!sr.equals(second)) throw new Error('consistency proof rejected: recomputed NEW root differs — proof does not land on the later signed root');
+  if (sn !== 0) throw new Error('consistency proof rejected: proof hashes exhausted before reaching the root');
 }
 
 function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
@@ -557,6 +598,7 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
   const anchoredSeqs = new Set();
   const provenSeqs = new Set();
   let setOnly = 0;
+  const cps = []; // verified checkpoints: raw material for the consistency chain
   let latest = null;
   for (const n of names) {
     const full = join(wDir, n);
@@ -601,7 +643,10 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
         try {
           const computed = rfcRootMirror(ip.logIndex, ip.treeSize, rfcLeafMirror(Buffer.from(body.rekor.entryBodyBase64, 'base64')), ip.hashes);
           if (!computed.equals(Buffer.from(cp.rootHashHex, 'hex'))) problems.push(`${n}: audit path does NOT land on the signed root — entry not proven in this tree`);
-          else if (Number.isInteger(body.chain?.seq)) provenSeqs.add(body.chain.seq);
+          else {
+            if (Number.isInteger(body.chain?.seq)) provenSeqs.add(body.chain.seq);
+            cps.push({ file: n, fileSha: sha256Hex(readFileSync(full)), origin: cp.origin, treeSize: ip.treeSize, rootHashHex: ip.rootHash });
+          }
         } catch (e) { problems.push(`${n}: inclusion proof rejected: ${e.message}`); }
       }
     } else {
@@ -610,6 +655,54 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
     if (Number.isInteger(body.chain?.seq)) {
       anchoredSeqs.add(body.chain.seq);
       if (!latest || body.chain.seq > latest.chain.seq) latest = body;
+    }
+  }
+  // 5) generation 3 — checkpoint consistency: every adjacent pair of
+  // captured checkpoints must chain append-only; two verified checkpoints
+  // that disagree at the SAME tree size are split-view evidence.
+  const bySizeKey = new Map();
+  for (const c of cps) {
+    const k = `${c.origin}|${c.treeSize}`;
+    const seen = bySizeKey.get(k);
+    if (seen && seen.rootHashHex !== c.rootHashHex) problems.push(`${c.file}: SPLIT-VIEW EVIDENCE — checkpoint at tree size ${c.treeSize} has a different root than ${seen.file}`);
+    if (!seen) bySizeKey.set(k, c);
+  }
+  let consNames = [];
+  try { consNames = readdirSync(wDir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).filter((n) => CONS_RE.test(n)).sort(); } catch { /* dir readable above */ }
+  const cpsByFile = new Map(cps.map((c) => [c.file, c]));
+  const verifiedEdges = new Set();
+  for (const n of consNames) {
+    const full = join(wDir, n);
+    const r = verifyFile(full, pinnedKey);
+    if (!r.ok) { problems.push(`${n}: DSSE verification failed: ${r.fails.join('; ')}`); continue; }
+    let body = null;
+    try { body = JSON.parse(Buffer.from(JSON.parse(readFileSync(full, 'utf8')).payload, 'base64').toString('utf8'))?.predicate?.summary ?? null; } catch { /* handled */ }
+    if (!body || body.kind !== 'szl-quant-witness-consistency') { problems.push(`${n}: unreadable consistency body`); continue; }
+    const pv = cpsByFile.get(body.prev?.receiptFile);
+    const nx = cpsByFile.get(body.next?.receiptFile);
+    if (!pv || !nx) { problems.push(`${n}: endpoint witness receipt(s) missing or unproven — a consistency link needs BOTH verified checkpoints`); continue; }
+    if (pv.fileSha !== body.prev.receiptSha256 || nx.fileSha !== body.next.receiptSha256) { problems.push(`${n}: endpoint receipt bytes CHANGED after linking (sha256 mismatch)`); continue; }
+    if (pv.origin !== body.origin || nx.origin !== body.origin) { problems.push(`${n}: origin mismatch between link and endpoint checkpoints`); continue; }
+    if (pv.treeSize !== body.prev.treeSize || pv.rootHashHex !== body.prev.rootHash || nx.treeSize !== body.next.treeSize || nx.rootHashHex !== body.next.rootHash) { problems.push(`${n}: claimed endpoint sizes/roots differ from the verified checkpoints`); continue; }
+    try {
+      rfcConsistencyMirror(body.prev.treeSize, body.next.treeSize, body.prev.rootHash, body.next.rootHash, body.proofHashes);
+      verifiedEdges.add(`${body.origin}|${body.prev.treeSize}|${body.next.treeSize}`);
+    } catch (e) { problems.push(`${n}: ${e.message}`); }
+  }
+  let consEdges = 0;
+  let consProven = 0;
+  {
+    const byOrigin = new Map();
+    for (const c of cps) {
+      if (!byOrigin.has(c.origin)) byOrigin.set(c.origin, new Set());
+      byOrigin.get(c.origin).add(c.treeSize);
+    }
+    for (const [origin, sizesSet] of byOrigin) {
+      const sizes = [...sizesSet].sort((a, b) => a - b);
+      for (let i = 1; i < sizes.length; i++) {
+        consEdges += 1;
+        if (verifiedEdges.has(`${origin}|${sizes[i - 1]}|${sizes[i]}`)) consProven += 1;
+      }
     }
   }
   // coverage vs. chain links actually present (gaps counted, not hidden)
@@ -623,9 +716,11 @@ function verifyWitness(rootDir, pinnedKey, rekorPubPath) {
   if (problems.length === 0 && latest) {
     const t = new Date(latest.rekor.integratedTime * 1000).toISOString();
     const setOnlyNote = setOnly > 0 ? ` (${setOnly} SET-only receipt(s) — each states that limit itself)` : '';
-    console.log(`WITNESS OK  anchors=${names.length}  heads anchored=${anchoredSeqs.size}/${linkSeqs.size} chain links  inclusion proven offline=${provenSeqs.size}/${linkSeqs.size}${setOnlyNote}  latest: seq ${latest.chain.seq} \u2192 rekor logIndex ${latest.rekor.logIndex} (integrated ${t}) [REPORTED, SET verified offline${provenSeqs.size > 0 ? ' + Merkle inclusion replayed offline' : ''}]`);
+    console.log(`WITNESS OK  anchors=${names.length}  heads anchored=${anchoredSeqs.size}/${linkSeqs.size} chain links  inclusion proven offline=${provenSeqs.size}/${linkSeqs.size}${setOnlyNote}  log consistency=${consProven}/${consEdges} adjacent checkpoint pair(s)  latest: seq ${latest.chain.seq} \u2192 rekor logIndex ${latest.rekor.logIndex} (integrated ${t}) [REPORTED, SET verified offline${provenSeqs.size > 0 ? ' + Merkle inclusion replayed offline' : ''}${consProven > 0 && consProven === consEdges ? ' + log consistency replayed offline' : ''}]`);
     console.log('      note: anchored heads live in a public append-only log — deleting this ledger does not delete the anchors; unwitnessed links are counted above, not hidden');
-    if (provenSeqs.size > 0) console.log('      note: inclusion is proven against the checkpoint captured at anchor time — checkpoint-to-checkpoint consistency is not verified offline');
+    if (consEdges > 0 && consProven === consEdges) console.log("      note: consistency replayed offline across every captured checkpoint — the log is proven append-only for this engine's whole observation window (single observer; no cross-witness gossip)");
+    else if (consEdges > 0) console.log(`      note: consistency proven for ${consProven}/${consEdges} adjacent checkpoint pair(s) — unproven edges are counted, not hidden (single observer; no cross-witness gossip)`);
+    else if (provenSeqs.size > 0) console.log('      note: inclusion is proven against the checkpoint captured at anchor time — checkpoint-to-checkpoint consistency is not verified offline');
     return true;
   }
   console.log('WITNESS BROKEN');
