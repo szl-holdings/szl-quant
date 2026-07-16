@@ -742,6 +742,7 @@ const { readFileSync: tsa9read } = await import('node:fs');
 const { canonicalBytes: tsa9canon } = await import('../src/canonical-json.mjs');
 const tsa9fix = new URL('./fixtures/tsa/', import.meta.url);
 const tsa9meta = JSON.parse(tsa9read(new URL('probe.meta.json', tsa9fix), 'utf8'));
+const tsa9NoNonce = JSON.parse(tsa9read(new URL('resp_digicert_no_nonce.json', tsa9fix), 'utf8'));
 const tsa9tok = (n) => tsa9read(new URL(`token_${n}.der`, tsa9fix));
 const tsa9pins = { digicert: tsa9read(new URL('../../../keys/tsa/digicert_anchor.pem', tsa9fix), 'utf8'), freetsa: tsa9read(new URL('../../../keys/tsa/freetsa_anchor.pem', tsa9fix), 'utf8') };
 
@@ -794,6 +795,35 @@ test('tsa: nonce echo compares by INTEGER VALUE, not raw hex bytes', () => {
   const v = tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert], expectedNonceHex: padded });
   assert.ok(v.genTime, 'redundant leading zero must not fail the echo check');
   assert.throws(() => tsa9.verifyTimestampToken({ tokenDer: tsa9tok('digicert'), expectedImprintHex: tsa9meta.hash, anchors: [tsa9pins.digicert], expectedNonceHex: 'deadbeef00112233' }), /nonce/i);
+});
+
+test('tsa: a requested nonce fails closed when the authority omits the echo', () => {
+  const responseDer = Buffer.from(tsa9NoNonce.responseDerBase64, 'base64');
+  const { tokenDer } = tsa9.parseTimestampResponse(responseDer);
+  assert.equal(tsa9.parseToken(tokenDer).tstInfo.nonceHex, null, 'fixture must contain no nonce');
+  assert.doesNotThrow(() => tsa9.verifyTimestampToken({
+    tokenDer,
+    expectedImprintHex: tsa9NoNonce.hash,
+    anchors: [tsa9pins.digicert],
+  }), 'the otherwise-valid token must verify when no nonce was requested');
+  assert.throws(() => tsa9.verifyTimestampToken({
+    tokenDer,
+    expectedImprintHex: tsa9NoNonce.hash,
+    anchors: [tsa9pins.digicert],
+    expectedNonceHex: tsa9NoNonce.requestedNonceHex,
+  }), /requested nonce echo is missing/i);
+});
+
+test('tsa: runtime and independent verifier keep the nonce validator in byte parity', () => {
+  const extractValidator = (relativePath) => {
+    const source = tsa9read(new URL(relativePath, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const start = source.indexOf('function assertNonceEcho(');
+    assert.notEqual(start, -1, `${relativePath} must define assertNonceEcho`);
+    const end = source.indexOf('\n}', start);
+    assert.notEqual(end, -1, `${relativePath} assertNonceEcho must have a closing brace`);
+    return source.slice(start, end + 2);
+  };
+  assert.equal(extractValidator('../src/tsa.mjs'), extractValidator('../verify/verify.mjs'));
 });
 
 test('tsa: truncated token DER throws instead of passing', () => {
