@@ -212,6 +212,25 @@ counted gap, backfilled on the next run.
 
 **Generation 5 — cross-witness gossip.** A second scheduled observer, [szl-quant-witness](https://github.com/szl-holdings/szl-quant-witness), watches the same ledger from its own vantage point: own repo, own ed25519 key (pinned at `keys/observer_pubkey.json`), own cron offset from the engine's. It re-verifies the head binding itself, verifies the engine-captured and live Rekor checkpoints under its own pin, replays the consistency proof offline BEFORE signing, and publishes signed observations. The engine fully re-verifies each observation offline (including recomputing the verdict — an observer cannot editorialize), archives them under `witness/gossip/`, accounts for them in signed gossip receipts, and the verifier sweeps every checkpoint both parties hold for split views. Same org, same operator — a second vantage point, not a second operator; every receipt says so.
 
+**Generation 6 — standalone divergence alarm.** `verify/divergence-alarm.mjs`
+is a small, self-contained script (imports nothing from `src/`, same
+discipline as `verify/verify.mjs`) whose only job is to answer one
+question as loudly as possible: across every gossip observation and
+every witnessed checkpoint currently on disk, is there ANY divergence —
+a bad DSSE signature, a claimed verdict that doesn't match independent
+recomputation, or two verified checkpoints at the same tree size with
+different roots? It re-derives RFC 6962 checkpoint parsing and
+consistency-proof replay from scratch and trusts nothing the data
+claims about itself. A clean run prints `status: CLEAN` and exits 0; any
+divergence prints exactly what disagreed and exits 1 (loud, red CI) —
+run it with `node verify/divergence-alarm.mjs --witness <ledger-root>`.
+It does not supersede `verify.mjs --witness` (which remains the full
+chain/inclusion/consistency/TSA/gossip walk); it is a narrower,
+independently-runnable second pass over the same gossip surface, built
+for a fast yes/no in CI. Like every gossip check in this repo, a CLEAN
+verdict is REPORTED corroboration for the observation window actually on
+disk — not proof of correctness, and not a trading or performance claim.
+
 Limits, plainly: only witnessed links are protected, outage gaps and
 unproven consistency edges are counted in the open, and consistency is
 proven between the checkpoints THIS engine captured — one observer, not

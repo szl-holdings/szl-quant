@@ -95,6 +95,14 @@ jobs:
           else
             echo "witness: no anchors yet (rekor unreachable so far) — an honest gap, stated in the open"
           fi
+          # Generation 6 — standalone divergence alarm over the same gossip
+          # surface (own script, own recomputation; a narrower, independently
+          # runnable fast yes/no on top of the --witness walk above).
+          if ls witness/gossip/obs_*.observation.json >/dev/null 2>&1; then
+            node "$GITHUB_WORKSPACE/verify/divergence-alarm.mjs" --pubkey "$GITHUB_WORKSPACE/keys/engine_pubkey.json" --rekor-pubkey "$GITHUB_WORKSPACE/keys/rekor_pubkey.pem" --observer-pubkey "$GITHUB_WORKSPACE/keys/observer_pubkey.json" --witness .
+          else
+            echo "divergence-alarm: no gossip observations archived yet — nothing to cross-check (honest gap, not a clean bill of health)"
+          fi
           # Regenerate INDEX.md — counts MEASURED from the files actually present.
           node -e '
             const fs = require("node:fs");
