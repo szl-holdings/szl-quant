@@ -945,13 +945,26 @@ function verifySig(parsed, pubKey) {
     if (!cryptoVerify(digest, data, { key: pubKey, dsaEncoding: 'der' }, sig)) throw new Error('TSA: CMS signature INVALID (ECDSA)');
   } else throw new Error(`TSA: unsupported signature algorithm ${alg}`);
 }
+function assertNonceEcho(expectedNonceHex, actualNonceHex) {
+  if (expectedNonceHex === null) return;
+  if (actualNonceHex === null) throw new Error('TSA: requested nonce echo is missing');
+  let expected;
+  let actual;
+  try {
+    expected = BigInt('0x' + expectedNonceHex);
+    actual = BigInt('0x' + actualNonceHex);
+  } catch {
+    throw new Error('TSA: nonce echo is not a valid hexadecimal INTEGER');
+  }
+  if (actual !== expected) throw new Error('TSA: nonce echo mismatch');
+}
 function verifyTimestampToken({ tokenDer, expectedImprintHex, anchors, expectedNonceHex = null, now = null }) {
   if (!anchors?.length) throw new Error('TSA: no pinned trust anchors provided — refusing to verify against nothing');
   const parsed = parseToken(tokenDer);
   const t = parsed.tstInfo;
   if (t.impAlgOid !== OID.sha256) throw new Error(`TSA: imprint algorithm is not sha256 (${t.impAlgOid})`);
   if (t.imprintHex !== expectedImprintHex) throw new Error('TSA: messageImprint does NOT match the witnessed bytes');
-  if (expectedNonceHex && t.nonceHex && BigInt('0x' + t.nonceHex) !== BigInt('0x' + expectedNonceHex)) throw new Error('TSA: nonce echo mismatch'); // value compare: DER echoes are minimal integers
+  assertNonceEcho(expectedNonceHex, t.nonceHex); // value compare: DER echoes are minimal integers
   const md = createHash(DIGEST_BY_OID[parsed.digestAlgOid]).update(parsed.tstDer).digest('hex');
   if (md !== parsed.mdHex) throw new Error('TSA: signedAttrs message-digest does not match TSTInfo content');
   const { x: signer, der: signerDer } = findSignerCert(parsed);
