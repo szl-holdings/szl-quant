@@ -62,13 +62,13 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 81 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency, RFC 3161 second witness, cross-witness gossip
+npm test                      # 97 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency, RFC 3161 second witness, cross-witness gossip, divergence alarm, proof-of-recomputation
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
 
 # independent verification (imports nothing from src/):
-node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/  # + gen-7: recomputes every backtest bit-exact from archived bytes
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/  # walk the tamper-evident hash chain
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --book  ledger/  # REPLAY the stateful paper book
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/  # REPLAY the refusal census
@@ -85,10 +85,40 @@ signals, still signed) — it never synthesizes a number.
   keyid = sha256(SPKI)[:16] (house convention; pin `keys/engine_pubkey.json`).
 - ✅ **Honest verdicts**: a BLOCKED decision is signed as BLOCKED — there is
   no code path that flips it.
+- ✅ **Recomputable numbers (backtests, generation 7)**: every walk-forward
+  figure re-derives bit-exact from the content-addressed dataset archive —
+  a valid signature alone cannot publish numbers that don't recompute.
 - ❌ It does **NOT** prove the signal is *good*. MEASURED backtests describe
   the past; nothing here claims predictive performance.
 - ❌ It does **NOT** upgrade advisory Λ to proven trust — `provenTrust` is
   structurally locked `false` (govsign pattern).
+
+## Proof of recomputation — MEASURED means re-derivable (generation 7)
+
+A signature proves who said it; generation 7 makes the *numbers* prove
+themselves. Every backtest receipt pins its exact input bytes at
+`data/datasets/<sha256>.json` (content-addressed: the filename IS the
+`dataset.sha256` the receipt already carries) and records the full replay
+contract (`method.grid`, `method.costModel`, `method.replay`). The
+independent verifier re-runs the entire walk-forward replay from those
+bytes with mirrored `src/`-independent math and requires **bit-exact**
+agreement with the signed numbers:
+
+```bash
+node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
+#   recompute: OK — 5 grid cell(s) re-derived bit-exact from 366 archived bars (MEASURED, recomputed)
+```
+
+- Forged PnL under a **valid signature** → `RECOMPUTE MISMATCH`, exit 1.
+  Even the keyholder cannot publish MEASURED numbers that don't recompute.
+- Tampered or missing archived dataset → content-address mismatch / fail
+  closed.
+- Pre-generation-7 receipts → honest `SKIP`, never a silent pass.
+
+Limit, stated plainly: recomputation proves *internal* consistency
+(numbers ⇄ archived bytes). Whether those bytes faithfully mirror the
+market remains REPORTED — pinned at fetch time, cross-checkable against
+any independent copy of the same public feed.
 
 ## Autonomous receipt ledger
 
@@ -286,6 +316,7 @@ CI runners live — a fallback that cannot fire is not resilience.)
 | `src/ouroboros.mjs` | bounded loop + loop-tax ledger (adapted from szl-holdings/ouroboros) |
 | `src/portfolio.mjs` | deterministic paper book, integer micro-USD, MODELED costs |
 | `src/backtest.mjs` | walk-forward MEASURED replays, full-population reporting |
+| `src/datasets.mjs` + `data/datasets/` | content-addressed backtest input archives — the bytes MEASURED claims recompute from (generation 7) |
 | `src/track.mjs` | verifiable track record — scores VERIFIED signal receipts vs realized closes, full population, signed report |
 | `src/chain.mjs` | tamper-evident hash chain over ledger runs — signed links, genesis backfill, honest truncation limit |
 | `src/book.mjs` | stateful cross-run paper book — signed, prev-hash-linked, verifier-REPLAYABLE transitions (MODELED, paper-only) |

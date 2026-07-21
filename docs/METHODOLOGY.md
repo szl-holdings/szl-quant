@@ -300,3 +300,52 @@ GitHub org under one maintainer. Gossip narrows the vantage-point and
 process limits, not the operator limit — an operator controlling both
 keys could fabricate agreeing views. Receipts and observations carry this
 limit in their `limits` arrays.
+
+### Proof of recomputation (generation 7)
+
+Generations 1–6 witness *what was said and when*. Generation 7 closes the
+remaining honesty gap for backtests: whether the MEASURED numbers are the
+true output of the stated method on the stated data.
+
+Mechanism:
+
+- **Content-addressed inputs.** At backtest time the engine archives the
+  exact canonical series bytes at `data/datasets/<sha256>.json`, where
+  `<sha256>` is the `dataset.sha256` already pinned inside the receipt
+  (`sha256(canonical-json(series))`). The hash is verified on write;
+  collisions refuse loudly; the receipt's `datasetArchive.path` must equal
+  the canonical path exactly (no traversal, no aliases).
+- **Complete replay contract.** The signed summary carries everything a
+  stranger needs to re-run the study: the full parameter grid, the MODELED
+  cost model, and `method.replay = { isFraction, startingCashUsd }`.
+- **Bit-exact recomputation.** `verify/verify.mjs --dir` re-derives every
+  walk-forward number (per-cell in-sample and out-of-sample equity,
+  returns, drawdowns, trade counts, win rates, split indices) from the
+  archived bytes using mirrored, `src/`-independent math over integer
+  micro-USD, and compares canonical JSON byte-for-byte. Any difference is
+  a `RECOMPUTE MISMATCH` and the verify FAILS.
+
+Failure semantics (fail closed):
+
+- Forged numbers under a valid signature → FAIL. The keyholder can no
+  longer publish MEASURED results the archive does not reproduce.
+- Archived bytes tampered → the content address itself convicts (hash
+  mismatch), FAIL.
+- Declared archive missing → FAIL: a MEASURED claim whose inputs are gone
+  does not re-verify.
+- Receipts predating generation 7 → honest SKIP (stated in the output),
+  never a silent pass; they remain signature- and doctrine-checked.
+
+Determinism note: replay math is IEEE-754 doubles plus integer micro-USD
+with a fixed operation order; `Math.log/exp/sqrt` on Node ≥ 20 use V8's
+portable fdlibm port, so recomputation is bit-stable across the platforms
+CI and the verifier run on. A mismatch therefore indicates altered inputs
+or altered numbers, not float noise.
+
+Limits, stated plainly:
+
+- Recompute proves numbers ⇄ archived bytes. It does **not** prove the
+  bytes faithfully mirror the market: ingest stays REPORTED, pinned at
+  fetch time. Anyone can cross-check the archived series against an
+  independent copy of the same public feed.
+- It does not make the strategy good — it makes the report honest.

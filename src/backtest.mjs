@@ -95,8 +95,10 @@ export function replaySeries(series, params, costModel, startingCashUsd = 10_000
  * Walk-forward backtest over a fixed, declared parameter grid.
  * Split: first `isFraction` of the series is IN-SAMPLE, rest OUT-OF-SAMPLE.
  * Returns results for the FULL population (both windows, every config).
+ * `isFraction` and `startingCashUsd` form the generation-7 replay contract:
+ * receipts record them so the verifier can recompute every number.
  */
-export function walkForward(series, grid, costModel, isFraction = 0.7) {
+export function walkForward(series, grid, costModel, isFraction = 0.7, startingCashUsd = 10_000) {
   const splitIdx = Math.floor(series.length * isFraction);
   const inSample = series.slice(0, splitIdx);
   const outSample = series.slice(splitIdx - 60 >= 0 ? splitIdx - 60 : 0); // carry warmup context
@@ -104,8 +106,8 @@ export function walkForward(series, grid, costModel, isFraction = 0.7) {
   for (const params of grid) {
     results.push({
       params,
-      inSample: replaySeries(inSample, params, costModel),
-      outOfSample: replaySeries(outSample, params, costModel),
+      inSample: replaySeries(inSample, params, costModel, startingCashUsd),
+      outOfSample: replaySeries(outSample, params, costModel, startingCashUsd),
     });
   }
   return {
