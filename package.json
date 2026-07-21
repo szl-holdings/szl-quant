@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/engine.test.mjs test/gossip.test.mjs test/divergence-alarm.test.mjs test/recompute.test.mjs",
+    "test": "node --test test/engine.test.mjs test/gossip.test.mjs test/divergence-alarm.test.mjs test/recompute.test.mjs test/sft-export.test.mjs",
     "backtest": "node bin/quant.mjs backtest",
     "paper": "node bin/quant.mjs paper",
     "verify": "node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/",
