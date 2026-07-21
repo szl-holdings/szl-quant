@@ -120,6 +120,34 @@ Limit, stated plainly: recomputation proves *internal* consistency
 market remains REPORTED — pinned at fetch time, cross-checkable against
 any independent copy of the same public feed.
 
+## Receipts become training data — SFT export with signed lineage
+
+`tools/sft-export.mjs` turns the receipt corpus into a supervised
+fine-tuning dataset whose every row is traceable and recomputable:
+
+```bash
+SZL_QUANT_KEY=… node tools/sft-export.mjs   # deterministic: same receipts → identical bytes
+```
+
+- Source receipts are **signature-verified** against the engine pubkey
+  before a single row is derived; archives are re-hashed against their
+  content addresses — any mismatch aborts the whole export (fail closed).
+- Rows replay the engine's actual decisions (`ENTER_LONG`/`EXIT_LONG`/
+  `HOLD`, plus genuine `ABSTAIN` on insufficient history) with per-row
+  `provenance`: source receipt sha256, dataset archive sha256, bar index.
+- `sft/quant_sft_v1.manifest.json` pins the JSONL bytes; a DSSE receipt
+  (`sft/quant_sft_v1.manifest.receipt.json`) signs the manifest. HOLD
+  downsampling (1-in-7 per stream) is declared, not hidden.
+- Published as [`SZLHOLDINGS/szl-quant-sft-v1`](https://huggingface.co/datasets/SZLHOLDINGS/szl-quant-sft-v1);
+  consumed by the training bridge at
+  [`szl-holdings/szl-gpu-bridge`](https://github.com/szl-holdings/szl-gpu-bridge),
+  which extends the chain: dataset receipt → signed job spec → on-metal
+  training receipt → eval receipt.
+
+Honesty: rows are DERIVED artifacts (deterministic replay over a REPORTED
+feed; MEASURED backtest context). They teach the *form* of doctrine-governed
+reasoning — they certify no market skill whatsoever.
+
 ## Autonomous receipt ledger
 
 The [`scheduled-paper` workflow](.github/workflows/scheduled-paper.yml) runs
