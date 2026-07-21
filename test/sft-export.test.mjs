@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, cpSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,6 +86,24 @@ test('sft-export: tampered dataset archive → export fails closed, zero rows wr
     () => exportSft({ repoRoot: dir, outDir: join(dir, 'sft') }),
     /hash mismatch|not canonical/i,
   );
+  // "zero rows written" must be literal: no partial JSONL may exist after the throw
+  assert.ok(!existsSync(join(dir, 'sft/quant_sft_v1.jsonl')), 'partial JSONL written despite fail-closed abort');
+  assert.ok(!existsSync(join(dir, 'sft/quant_sft_v1.manifest.json')), 'manifest written despite fail-closed abort');
+});
+
+test('sft-export: valid signature under a mislabeled keyId → refused, fail closed', () => {
+  // DSSE PAE does not cover the keyid field, so a tamperer can relabel a
+  // genuinely-signed envelope. The exporter must catch label≠derived-key.
+  const dir = fixtureRepo();
+  const f = join(dir, 'receipts/backtest_BTC_365d.receipt.json');
+  const env = JSON.parse(readFileSync(f, 'utf8'));
+  env.signatures[0].keyid = 'deadbeefdeadbeef'; // signature bytes untouched — still valid
+  writeFileSync(f, JSON.stringify(env, null, 2));
+  assert.throws(
+    () => exportSft({ repoRoot: dir, outDir: join(dir, 'sft') }),
+    /keyid|expected engine|fail closed/i,
+  );
+  assert.ok(!existsSync(join(dir, 'sft/quant_sft_v1.jsonl')), 'partial JSONL written despite keyid refusal');
 });
 
 test('sft-export: forged source receipt (bad signature) → refused, fail closed', () => {
@@ -113,8 +131,13 @@ test('sft-export: committed sft artifacts verify — manifest sha, receipt signa
   assert.equal(v.ok, true, `sft receipt signature invalid: ${v.reason}`);
   const stmt = JSON.parse(Buffer.from(env.payload, 'base64').toString());
   assert.equal(stmt.predicateType, 'https://szl.holdings/quant/sft-export/v1');
+  // name/digest must be a TRUTHFUL pair: digest is over the manifest bytes,
+  // so the subject must name the manifest (the manifest pins the JSONL).
+  assert.equal(stmt.subject[0].name, 'sft/quant_sft_v1.manifest.json', 'subject name must match what the digest actually pins');
   const digest = stmt.subject[0].digest.sha256;
   assert.equal(digest, sha256(canonicalBytes(manifest)), 'subject digest does not pin the committed manifest');
+  // the manifest must pin its own generator so "recomputable" is a bounded claim
+  assert.equal(manifest.generatorSha256, sha256(readFileSync(join(ROOT, 'tools/sft-export.mjs'))), 'manifest generatorSha256 does not match the committed exporter');
 });
 
 test('sft-export: ABSTAIN rows are genuine engine abstentions', () => {

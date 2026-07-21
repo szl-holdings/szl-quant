@@ -62,7 +62,7 @@ honest exit, not a failure to hide).
 
 ```bash
 # no dependencies — Node ≥ 20, stdlib only (everything vendored, no runtime CDNs)
-npm test                      # 97 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency, RFC 3161 second witness, cross-witness gossip, divergence alarm, proof-of-recomputation
+npm test                      # 105 unit tests: doctrine invariants, DSSE, gates, determinism, ingest fallback, track record, hash chain, paper book, refusal record, external witness, Merkle inclusion, log consistency, RFC 3161 second witness, cross-witness gossip, divergence alarm, proof-of-recomputation, SFT-export lineage (fail-closed source verification, tamper/forgery/keyid refusal, committed-artifact checks)
 
 node bin/quant.mjs backtest   # MEASURED walk-forward backtests on real public history
 node bin/quant.mjs paper      # one live paper session (REPORTED feeds) → signed signals
@@ -371,4 +371,4 @@ this engine's local implementations onto those F-ids is **NOT asserted**
 
 ---
 
-<sub>SZL Holdings · [a-11-oy.com](https://a-11-oy.com) · Doctrine v11 · SLSA L1 honest · L2 attested · L3 roadmap (this repo: L1) · trust ceiling 0.97 · Λ = Conjecture 1 · Apache-2.0 · **not financial advice, paper-only, receipts-verifiable**</sub>
+<sub>SZL Holdings · [a-11-oy.com](https://a-11-oy.com) · Doctrine v11 · SLSA L1 honest · L2 attestation under repair (no claim while red) · L3 roadmap (this repo: L1) · trust ceiling 0.97 · Λ = Conjecture 1 · Apache-2.0 · **not financial advice, paper-only, receipts-verifiable**</sub>
