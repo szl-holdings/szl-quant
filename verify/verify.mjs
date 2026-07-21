@@ -16,6 +16,13 @@
  *     and mark from the signed signal receipts alone (frozen v1 rules) and
  *     require byte-exact agreement — a book that can't be replayed FAILS
  *
+ *   Generation 7 (proof-of-recomputation): --dir additionally RECOMPUTES
+ *   every backtest receipt that declares a datasetArchive — it re-derives
+ *   ALL walk-forward numbers from the content-addressed dataset bytes at
+ *   data/datasets/<sha256>.json and requires bit-exact agreement. A valid
+ *   signature is NOT enough to publish a MEASURED claim: the numbers must
+ *   recompute. (--datasets-root overrides the repo root for the archive.)
+ *
  * Checks per receipt (ALL must pass):
  *   1. DSSE envelope: payloadType, base64 payload, ed25519 signature over
  *      spec-exact PAE("DSSEv1", type, payload) with keyid = sha256(SPKI)[:16].
@@ -31,7 +38,8 @@
  */
 import { createPublicKey, createHash, verify as edVerify, verify as cryptoVerify, X509Certificate, constants as cconst } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const LOCKED = ['F1', 'F11', 'F12', 'F18', 'F19', 'F22', 'F4', 'F7']; // sorted
 const CEILING = 0.97;
@@ -1201,6 +1209,279 @@ function verifyGossip(rootDir, pinnedKey, rekorPubPath2, observerPubPath2) {
   return true;
 }
 
+// ---- generation 7: proof-of-recomputation --------------------------------
+// Self-contained mirror of the deterministic replay math (src/formulas.mjs,
+// src/strategy.mjs, src/portfolio.mjs, src/backtest.mjs) with byte-exact
+// operation order, so recomputed IEEE-754 doubles are bit-identical to the
+// engine's. Imports NOTHING from src/ — the verifier audits the engine, it
+// does not trust it. Transcendentals (Math.log/exp/sqrt) are deterministic
+// across platforms on V8's portable fdlibm port (Node ≥ 20); a mismatch
+// therefore means tampered/false numbers, not float noise (METHODOLOGY.md).
+//
+// The signal-score arithmetic (squash/Hoeffding/Λ roll-up) is deliberately
+// NOT mirrored here: backtest results contain no conviction values, and for
+// in-range inputs that arithmetic cannot throw or alter the trade action —
+// only periodReturn / zScore / annualizedVol gate the action path.
+
+function meanStdM7(xs) {
+  if (!Array.isArray(xs) || xs.length < 2) return null;
+  const m = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const v = xs.reduce((a, b) => a + (b - m) * (b - m), 0) / xs.length;
+  return { mean: m, std: Math.sqrt(v) };
+}
+function periodReturnM7(closes, lookback) {
+  if (!Array.isArray(closes) || closes.length < lookback + 1) return null;
+  const now = closes[closes.length - 1];
+  const then = closes[closes.length - 1 - lookback];
+  if (!(then > 0) || !Number.isFinite(now)) return null;
+  return now / then - 1;
+}
+function zScoreM7(closes, window) {
+  if (!Array.isArray(closes) || closes.length < window + 1) return null;
+  const win = closes.slice(-window - 1, -1);
+  const ms = meanStdM7(win);
+  if (!ms || !(ms.std > 0)) return null;
+  return (closes[closes.length - 1] - ms.mean) / ms.std;
+}
+function logReturnsM7(closes) {
+  const out = [];
+  for (let i = 1; i < closes.length; i++) {
+    if (!(closes[i - 1] > 0) || !(closes[i] > 0)) return null;
+    out.push(Math.log(closes[i] / closes[i - 1]));
+  }
+  return out;
+}
+function annualizedVolM7(closes, window) {
+  const rets = logReturnsM7(closes.slice(-(window + 1)));
+  if (!rets || rets.length < 2) return null;
+  const ms = meanStdM7(rets);
+  if (!ms) return null;
+  return ms.std * Math.sqrt(365);
+}
+/** Action-determining core of src/strategy.mjs evaluate() (see note above). */
+function evaluateActionM7(series, params) {
+  const closes = series.map((s) => s.close);
+  const { momentumLookback, zWindow, zEntry, volWindow } = params;
+  const momRet = periodReturnM7(closes, momentumLookback);
+  const z = zScoreM7(closes, zWindow);
+  const vol = annualizedVolM7(closes, volWindow);
+  if (momRet === null || z === null || vol === null) return 'ABSTAIN';
+  let action = 'HOLD';
+  if (momRet > 0 && z <= -zEntry) action = 'ENTER_LONG';
+  else if (momRet > 0 && Math.abs(z) < zEntry) action = 'ENTER_LONG';
+  else if (z >= 0 && momRet <= 0) action = 'EXIT_LONG';
+  return action;
+}
+function makeBookM7({ startingCashUsd, costModel }) {
+  if (!(startingCashUsd > 0)) throw new Error('startingCashUsd must be > 0');
+  if (!costModel || !Number.isFinite(costModel.feeBps) || !Number.isFinite(costModel.slippageBps)) {
+    throw new Error('explicit costModel {feeBps, slippageBps} required (MODELED)');
+  }
+  return { cashMicro: toMicroB(startingCashUsd), positions: {}, fills: [], costModel };
+}
+function paperFillM7(book, { asset, side, notionalUsd, qtyE9: sellQtyE9, price, atIso, reason }) {
+  if (!(price > 0)) throw new Error('fill requires observed price > 0');
+  const costRate = (book.costModel.feeBps + book.costModel.slippageBps) / 10_000;
+  const pos = book.positions[asset] ?? { qtyE9: 0n, costMicro: 0n };
+  let fill;
+  if (side === 'BUY') {
+    if (!(notionalUsd > 0)) throw new Error('BUY requires notionalUsd > 0');
+    const notionalMicro = toMicroB(notionalUsd);
+    if (book.cashMicro < notionalMicro) throw new Error('insufficient paper cash (no leverage in paper book)');
+    const effPrice = price * (1 + costRate);
+    const qtyE9 = (notionalMicro * QTY_B) / toMicroB(effPrice);
+    book.cashMicro -= notionalMicro;
+    pos.qtyE9 += qtyE9;
+    pos.costMicro += notionalMicro;
+    fill = { asset, side, qtyE9: qtyE9.toString(), atIso, reason };
+  } else if (side === 'SELL') {
+    const q = typeof sellQtyE9 === 'bigint' ? sellQtyE9 : BigInt(sellQtyE9 ?? 0);
+    if (!(q > 0n)) throw new Error('SELL requires qtyE9 > 0');
+    if (pos.qtyE9 < q) throw new Error('insufficient paper position (no shorting in v1 paper book)');
+    const effPrice = price * (1 - costRate);
+    const proceedsMicro = (q * toMicroB(effPrice)) / QTY_B;
+    book.cashMicro += proceedsMicro;
+    pos.qtyE9 -= q;
+    if (pos.qtyE9 === 0n) pos.costMicro = 0n;
+    fill = { asset, side, qtyE9: q.toString(), atIso, reason };
+  } else {
+    throw new Error(`unknown side ${side}`);
+  }
+  book.positions[asset] = pos;
+  book.fills.push(fill);
+  return fill;
+}
+function markToMarketM7(book, pricesByAsset, atIso) {
+  let equityMicro = book.cashMicro;
+  let unpriced = 0;
+  for (const [asset, pos] of Object.entries(book.positions)) {
+    if (pos.qtyE9 === 0n) continue;
+    const p = pricesByAsset[asset];
+    if (!(p > 0)) { unpriced++; continue; }
+    const valueMicro = (pos.qtyE9 * toMicroB(p)) / QTY_B;
+    equityMicro += valueMicro;
+  }
+  return {
+    atIso,
+    cashUsd: microStrB(book.cashMicro),
+    equityUsd: unpriced === 0 ? microStrB(equityMicro) : null,
+  };
+}
+function maxDrawdownM7(equity) {
+  let peak = -Infinity, mdd = 0;
+  for (const e of equity) {
+    peak = Math.max(peak, e);
+    if (peak > 0) mdd = Math.max(mdd, (peak - e) / peak);
+  }
+  return mdd;
+}
+/** Byte-exact mirror of src/backtest.mjs replaySeries(). */
+function replaySeriesM7(series, params, costModel, startingCashUsd = 10_000) {
+  const book = makeBookM7({ startingCashUsd, costModel });
+  const equity = [];
+  let inPosition = false;
+  const trades = [];
+  const warmup = Math.max(params.momentumLookback, params.zWindow, params.volWindow) + 2;
+  for (let i = warmup; i < series.length - 1; i++) {
+    const window = series.slice(0, i + 1);
+    const action = evaluateActionM7(window, params);
+    const nextBar = series[i + 1];
+    const atIso = new Date(nextBar.tMs).toISOString();
+    if (action === 'ENTER_LONG' && !inPosition) {
+      const cashUsd = Number(markToMarketM7(book, {}, atIso).cashUsd);
+      const notional = Math.floor(cashUsd * params.positionFraction * 100) / 100;
+      if (notional >= 10) {
+        paperFillM7(book, { asset: 'ASSET', side: 'BUY', notionalUsd: notional, price: nextBar.close, atIso, reason: 'ENTER_LONG @ next close (no lookahead)' });
+        inPosition = true;
+        trades.push({ t: atIso, side: 'BUY', price: nextBar.close });
+      }
+    } else if (action === 'EXIT_LONG' && inPosition) {
+      const pos = book.positions.ASSET;
+      if (pos.qtyE9 > 0n) {
+        paperFillM7(book, { asset: 'ASSET', side: 'SELL', qtyE9: pos.qtyE9, price: nextBar.close, atIso, reason: 'EXIT_LONG @ next close (no lookahead)' });
+        inPosition = false;
+        trades.push({ t: atIso, side: 'SELL', price: nextBar.close });
+      }
+    }
+    const mtm = markToMarketM7(book, { ASSET: series[i + 1].close }, atIso);
+    if (mtm.equityUsd !== null) equity.push(Number(mtm.equityUsd));
+  }
+  const last = series[series.length - 1];
+  const finalMark = markToMarketM7(book, { ASSET: last.close }, new Date(last.tMs).toISOString());
+  const finalEquity = finalMark.equityUsd !== null ? Number(finalMark.equityUsd) : null;
+  let wins = 0, roundTrips = 0;
+  for (let i = 0; i + 1 < trades.length; i += 2) {
+    if (trades[i].side === 'BUY' && trades[i + 1].side === 'SELL') {
+      roundTrips++;
+      if (trades[i + 1].price > trades[i].price) wins++;
+    }
+  }
+  return {
+    finalEquityUsd: finalEquity,
+    totalReturn: finalEquity === null ? null : finalEquity / startingCashUsd - 1,
+    maxDrawdown: equity.length ? maxDrawdownM7(equity) : null,
+    nTrades: trades.length,
+    nRoundTrips: roundTrips,
+    winRate: roundTrips > 0 ? wins / roundTrips : null,
+    winRateNote: roundTrips < 10 ? `only ${roundTrips} round trips — win rate is statistically weak evidence` : undefined,
+    openAtEnd: inPosition,
+  };
+}
+/** Byte-exact mirror of src/backtest.mjs walkForward(). */
+function walkForwardM7(series, grid, costModel, isFraction, startingCashUsd) {
+  const splitIdx = Math.floor(series.length * isFraction);
+  const inSample = series.slice(0, splitIdx);
+  const outSample = series.slice(splitIdx - 60 >= 0 ? splitIdx - 60 : 0); // carry warmup context
+  const results = [];
+  for (const params of grid) {
+    results.push({
+      params,
+      inSample: replaySeriesM7(inSample, params, costModel, startingCashUsd),
+      outOfSample: replaySeriesM7(outSample, params, costModel, startingCashUsd),
+    });
+  }
+  return {
+    splitIndex: splitIdx,
+    inSampleBars: inSample.length,
+    outOfSampleBars: series.length - splitIdx,
+    populationSize: grid.length,
+    cherryPickNote: 'ALL configs reported (full population). Selecting the best cell after the fact is multiple testing — see METHODOLOGY.md.',
+    results,
+  };
+}
+/** First-divergence finder for honest mismatch messages. */
+function diffPathM7(a, b, path = '$') {
+  if (a === b) return null;
+  const ta = a === null ? 'null' : typeof a;
+  const tb = b === null ? 'null' : typeof b;
+  if (ta !== tb) return `${path} (recomputed ${ta} ${JSON.stringify(a) ?? String(a)} vs signed ${tb} ${JSON.stringify(b) ?? String(b)})`;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return `${path}.length (recomputed ${a.length} vs signed ${b.length})`;
+    for (let i = 0; i < a.length; i++) { const d = diffPathM7(a[i], b[i], `${path}[${i}]`); if (d) return d; }
+    return null;
+  }
+  if (ta === 'object') {
+    const keys = new Set([...Object.keys(a).filter((k) => a[k] !== undefined), ...Object.keys(b).filter((k) => b[k] !== undefined)]);
+    for (const k of [...keys].sort()) { const d = diffPathM7(a?.[k], b?.[k], `${path}.${k}`); if (d) return d; }
+    return null;
+  }
+  return `${path} (recomputed ${JSON.stringify(a)} vs signed ${JSON.stringify(b)})`;
+}
+const BACKTEST_PREDICATE_M7 = 'https://szl.holdings/quant/backtest/v1';
+/**
+ * Recompute one backtest receipt's numbers from its archived dataset.
+ * Returns null for non-backtest receipts; { ok, skip? } | { ok:false, fails }.
+ */
+function recomputeBacktest(file, datasetsRoot) {
+  let st;
+  try {
+    const env = JSON.parse(readFileSync(file, 'utf8'));
+    st = JSON.parse(Buffer.from(env.payload, 'base64').toString('utf8'));
+  } catch { return null; } // unreadable — the signature pass already failed it
+  if (st?.predicateType !== BACKTEST_PREDICATE_M7) return null;
+  const summary = st.predicate?.summary;
+  if (!summary) return { ok: false, fails: ['backtest receipt missing predicate.summary'] };
+  if (!summary.datasetArchive) {
+    return { ok: true, skip: 'pre-generation-7 receipt (no datasetArchive) — numbers cannot be recomputed; signature/doctrine checks only' };
+  }
+  const fails = [];
+  const pinned = String(summary.dataset?.sha256 ?? '');
+  if (!/^[0-9a-f]{64}$/.test(pinned)) return { ok: false, fails: ['dataset.sha256 is not 64 lowercase hex chars'] };
+  const expectPath = `data/datasets/${pinned}.json`;
+  if (summary.datasetArchive.path !== expectPath) {
+    return { ok: false, fails: [`datasetArchive.path "${summary.datasetArchive.path}" is not the canonical "${expectPath}" (anchored exact match required — no traversal, no aliases)`] };
+  }
+  let bytes;
+  try { bytes = readFileSync(join(datasetsRoot, expectPath)); } catch {
+    return { ok: false, fails: [`declared dataset archive MISSING at ${expectPath} — a MEASURED claim whose inputs are gone does not re-verify (fail closed)`] };
+  }
+  if (sha256Hex(bytes) !== pinned) {
+    return { ok: false, fails: [`archived dataset bytes hash ${sha256Hex(bytes).slice(0, 16)}… ≠ pinned ${pinned.slice(0, 16)}… — dataset bytes TAMPERED or corrupted`] };
+  }
+  let series;
+  try { series = JSON.parse(bytes.toString('utf8')); } catch { return { ok: false, fails: ['archived dataset is not valid JSON'] }; }
+  if (!Array.isArray(series) || series.length < 2 || !series.every((r) => r && Number.isFinite(r.tMs) && Number.isFinite(r.close) && r.close > 0)) {
+    return { ok: false, fails: ['archived dataset rows invalid — need [{tMs, close>0}, …]'] };
+  }
+  if (summary.dataset?.n !== series.length) fails.push(`dataset.n ${summary.dataset?.n} ≠ archived row count ${series.length}`);
+  const method = summary.method ?? {};
+  const replay = method.replay ?? {};
+  const cm = method.costModel ?? {};
+  if (!Array.isArray(method.grid) || method.grid.length === 0) fails.push('method.grid missing/empty — cannot recompute');
+  if (!Number.isFinite(replay.isFraction) || !(replay.isFraction > 0 && replay.isFraction < 1)) fails.push('method.replay.isFraction missing/invalid — replay contract incomplete');
+  if (!Number.isFinite(replay.startingCashUsd) || !(replay.startingCashUsd > 0)) fails.push('method.replay.startingCashUsd missing/invalid — replay contract incomplete');
+  if (!Number.isFinite(cm.feeBps) || !Number.isFinite(cm.slippageBps)) fails.push('method.costModel missing finite feeBps/slippageBps');
+  if (fails.length) return { ok: false, fails };
+  let recomputed;
+  try { recomputed = walkForwardM7(series, method.grid, { feeBps: cm.feeBps, slippageBps: cm.slippageBps }, replay.isFraction, replay.startingCashUsd); }
+  catch (e) { return { ok: false, fails: [`replay threw: ${e.message}`] }; }
+  if (canonicalize(recomputed) !== canonicalize(summary.walkForward ?? null)) {
+    const where = diffPathM7(recomputed, summary.walkForward ?? null);
+    return { ok: false, fails: [`RECOMPUTE MISMATCH at ${where} — the signed numbers do NOT re-derive from the archived dataset (a valid signature cannot rescue false numbers)`] };
+  }
+  return { ok: true, recomputed: true, cells: method.grid.length, bars: series.length };
+}
+
 const args = process.argv.slice(2);
 let pinnedKey = null;
 let chainDir = null;
@@ -1210,6 +1491,7 @@ let witnessRoot = null;
 let rekorPubPath = 'keys/rekor_pubkey.pem';
 let tsaAnchorsDir = 'keys/tsa';
 let observerPubPath = 'keys/observer_pubkey.json';
+let datasetsRoot = join(dirname(fileURLToPath(import.meta.url)), '..'); // repo root — datasetArchive paths are repo-relative
 const files = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--pubkey') {
@@ -1234,21 +1516,44 @@ for (let i = 0; i < args.length; i++) {
     tsaAnchorsDir = args[++i];
   } else if (args[i] === '--observer-pubkey') {
     observerPubPath = args[++i];
+  } else if (args[i] === '--datasets-root') {
+    datasetsRoot = args[++i];
   } else files.push(args[i]);
 }
 if (files.length === 0 && !chainDir && !bookDir && !refusalsDir && !witnessRoot) {
-  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] [--rekor-pubkey keys/rekor_pubkey.pem] [--tsa-anchors keys/tsa] [--observer-pubkey keys/observer_pubkey.json] (--dir receipts/ | --chain ledger/ | --book ledger/ | --refusals ledger/ | --witness rootdir/ | receipt.json ...)');
+  console.error('usage: node verify/verify.mjs [--pubkey keys/engine_pubkey.json] [--rekor-pubkey keys/rekor_pubkey.pem] [--tsa-anchors keys/tsa] [--observer-pubkey keys/observer_pubkey.json] [--datasets-root DIR] (--dir receipts/ | --chain ledger/ | --book ledger/ | --refusals ledger/ | --witness rootdir/ | receipt.json ...)');
   process.exit(2);
 }
 let allOk = true;
+const recompStats = { recomputed: 0, skipped: 0, failed: 0 };
 for (const f of files.sort()) {
   const r = verifyFile(f, pinnedKey);
   allOk &&= r.ok;
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${f}${r.keyid ? `  keyid=${r.keyid}` : ''}`);
   for (const n of r.notes ?? []) console.log(`      note: ${n}`);
   for (const x of r.fails ?? []) console.log(`      FAIL: ${x}`);
+  if (r.ok) {
+    // generation 7: MEASURED backtest numbers must re-derive from archived bytes
+    const rr = recomputeBacktest(f, datasetsRoot);
+    if (rr) {
+      if (rr.ok && rr.recomputed) {
+        recompStats.recomputed++;
+        console.log(`      recompute: OK — ${rr.cells} grid cell(s) re-derived bit-exact from ${rr.bars} archived bars (MEASURED, recomputed)`);
+      } else if (rr.ok && rr.skip) {
+        recompStats.skipped++;
+        console.log(`      recompute: SKIP — ${rr.skip}`);
+      } else {
+        recompStats.failed++;
+        allOk = false;
+        for (const x of rr.fails) console.log(`      RECOMPUTE FAIL: ${x}`);
+      }
+    }
+  }
 }
 if (files.length > 0) console.log(allOk ? `\nAll ${files.length} receipt(s) verified.` : '\nVERIFICATION FAILED');
+if (recompStats.recomputed + recompStats.skipped + recompStats.failed > 0) {
+  console.log(`Recompute (generation 7): ${recompStats.recomputed} backtest receipt(s) re-derived bit-exact, ${recompStats.skipped} skipped (pre-gen7), ${recompStats.failed} FAILED.`);
+}
 if (chainDir) allOk = verifyChain(chainDir, pinnedKey) && allOk;
 if (bookDir) allOk = verifyBook(bookDir, pinnedKey) && allOk;
 if (refusalsDir) allOk = verifyRefusals(refusalsDir, pinnedKey) && allOk;

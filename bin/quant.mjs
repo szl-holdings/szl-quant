@@ -17,6 +17,7 @@ import { RATE_DELAY_MS, sleep } from '../src/ingest/coingecko.mjs';
 import { fetchDailyHistoryResilient, HISTORY_IDS_BY_ADDRESS } from '../src/ingest/history.mjs';
 import { fetchSolanaPairs, deepestPairs } from '../src/ingest/dexscreener.mjs';
 import { walkForward } from '../src/backtest.mjs';
+import { archiveDataset, datasetArchivePath } from '../src/datasets.mjs';
 import { decideLive, DEFAULT_PARAMS, DEFAULT_LIMITS } from '../src/engine.mjs';
 import { makeLoopTaxLedger, runBoundedLoop } from '../src/ouroboros.mjs';
 import { signReceipt, PREDICATE } from '../src/receipts.mjs';
@@ -74,6 +75,10 @@ const LIVE_HISTORY_IDS = HISTORY_IDS_BY_ADDRESS;
 
 const COST_MODEL = { feeBps: 30, slippageBps: 20 }; // MODELED, stated in receipts
 
+/** Generation-7 replay contract — recorded in every backtest receipt so the
+ *  independent verifier can recompute every walk-forward number. */
+const REPLAY = Object.freeze({ isFraction: 0.7, startingCashUsd: 10_000 });
+
 function arg(name, dflt) {
   const i = process.argv.indexOf(`--${name}`);
   return i > -1 ? process.argv[i + 1] : dflt;
@@ -95,14 +100,22 @@ async function cmdBacktest() {
       continue;
     }
     console.log(`  dataset src=${hist.dataset.source} n=${hist.dataset.n} ${hist.dataset.firstIso} → ${hist.dataset.lastIso} sha256=${hist.dataset.sha256.slice(0, 16)}…`);
-    const wf = walkForward(hist.series, GRID, COST_MODEL);
+    const archived = archiveDataset(ROOT, hist.series, hist.dataset.sha256);
+    console.log(`  dataset archived → ${archived.path} (${archived.bytes} bytes, content-addressed${archived.existed ? ', already present' : ''})`);
+    const wf = walkForward(hist.series, GRID, COST_MODEL, REPLAY.isFraction, REPLAY.startingCashUsd);
     const summary = {
       asset: { symbol, coinId },
       dataset: hist.dataset,                    // REPORTED feed, sha256-pinned
+      datasetArchive: {
+        path: datasetArchivePath(hist.dataset.sha256),
+        scheme: 'content-addressed: filename = dataset.sha256 = sha256(canonical-json(series)); file content is exactly the hashed bytes',
+        note: 'generation 7 — the verifier recomputes every walk-forward number below from these bytes and requires bit-exact agreement',
+      },
       method: {
         kind: 'walk-forward replay, decisions at close t filled at close t+1 (no lookahead)',
         costModel: { ...COST_MODEL, label: 'MODELED' },
         grid: GRID,
+        replay: { ...REPLAY, note: 'deterministic replay contract — the recomputation inputs (generation 7)' },
         label: 'MEASURED',                       // replay of real history
         limits: 'Daily bars only; long-only; no shorting/leverage; small-n win rates are weak evidence; multiple-testing risk disclosed (full population reported).',
       },
