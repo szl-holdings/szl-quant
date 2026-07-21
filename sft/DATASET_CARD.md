@@ -44,7 +44,9 @@ Doctrine-governed advisory reasoning, in the engine's own voice:
 - genuine **ABSTAIN** examples where history is insufficient — an absent value carries no value;
 - fixed caveats in every answer: paper-only, advisory, not financial advice.
 
-Composition (2,693 rows): `ENTER_LONG` 1,267 · `EXIT_LONG` 773 · `HOLD` 637 (downsampled 1-in-7 per stream, declared rule) · `ABSTAIN` 16. Assets: BTC, ETH, SOL, JUP (365d daily, ending 2026-07-21).
+Composition (2,693 rows): `ENTER_LONG` 1,267 · `EXIT_LONG` 773 · `HOLD` 637 (downsampled 1-in-7 per stream, declared rule) · `ABSTAIN` 16. Assets (rows): BTC 682 · ETH 707 · SOL 741 · BONK 563 (365d daily, ending 2026-07-21).
+
+Timestamps: each row's `asOfIso` is the **decision** bar close; the engine books fills at the *next* bar close. Evidence windows end at the decision bar — no lookahead.
 
 ## Row format
 
@@ -52,7 +54,7 @@ Composition (2,693 rows): `ENTER_LONG` 1,267 · `EXIT_LONG` 773 · `HOLD` 637 (d
 {
   "messages": [
     {"role": "system", "content": "You are SZL-Quant, a doctrine-governed advisory research analyst. LAW: …"},
-    {"role": "user", "content": "{\"task\":\"advisory-signal-decision\",\"asset\":\"BTC\",\"asOfIso\":…,\"params\":…,\"evidence\":{…}}"},
+    {"role": "user", "content": "{\"task\":\"advisory-signal-decision\",\"asset\":{\"coinId\":\"bitcoin\",\"symbol\":\"BTC\"},\"asOfIso\":…,\"params\":…,\"evidence\":{…}}"},
     {"role": "assistant", "content": "{\"action\":\"HOLD\",\"components\":[…],\"conviction\":null,…,\"caveats\":[…]}"}
   ],
   "provenance": {

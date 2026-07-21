@@ -204,10 +204,11 @@ export function exportSft({ repoRoot, outDir }) {
   const manifest = {
     version: 'quant-sft-v1',
     generator: 'tools/sft-export.mjs v1',
+    generatorSha256: sha256HexBytes(readFileSync(fileURLToPath(import.meta.url))),
     rows: rows.length,
     counts,
     downsampleRule: `HOLD decisions kept 1-in-${HOLD_KEEP_EVERY} per (receipt, grid-cell) stream, deterministic; all ENTER/EXIT/ABSTAIN kept`,
-    abstainRule: `windows of length max(2, warmup-1-offset) for offsets ${JSON.stringify(ABSTAIN_WINDOW_OFFSETS)} per grid cell; only genuine engine abstentions emitted`,
+    abstainRule: `probe windows near warmup (length max(2, warmup-1-offset), offsets ${JSON.stringify(ABSTAIN_WINDOW_OFFSETS)}) per grid cell; only genuine engine abstentions kept — probes that decide are skipped, never relabeled`,
     sources,
     jsonlSha256,
     jsonlBytes: Buffer.byteLength(jsonl, 'utf8'),
@@ -215,7 +216,8 @@ export function exportSft({ repoRoot, outDir }) {
       rowsAre: 'DERIVED — deterministic replay of content-addressed dataset archives pinned by DSSE-signed MEASURED backtest receipts; the underlying feed is REPORTED venue history',
       neverInvented: true,
       trustCeiling: TRUST_CEILING,
-      note: 'every row carries provenance {sourceReceipt, receiptSha256, datasetSha256, barIndex} and is recomputable bit-exact from the archives',
+      note: 'every row carries provenance {sourceReceipt, receiptSha256, datasetSha256, barIndex} and is recomputable bit-exact from the archives (given the generator pinned by generatorSha256)',
+      timestampNote: 'row asOfIso = the DECISION bar close; the engine books fills at the NEXT bar close (see src/backtest.mjs) — evidence windows end at the decision bar, no lookahead',
     },
   };
   const manifestPath = join(outDir, 'quant_sft_v1.manifest.json');
@@ -243,9 +245,12 @@ function main() {
   const privateKey = loadPrivateKey(keyPath);
   const pub = JSON.parse(readFileSync(resolve(repoRoot, 'keys/engine_pubkey.json'), 'utf8'));
   const publicKey = loadPublicKeyFromSpkiBase64(pub.publicKeySpkiBase64);
+  // subject name/digest MUST be a truthful pair: the digest is over the
+  // manifest bytes, so the subject names the manifest. The manifest in turn
+  // pins the JSONL via jsonlSha256 (transitive chain, each link honest).
   const { envelope } = signReceipt({
     predicateType: 'https://szl.holdings/quant/sft-export/v1',
-    subjectName: 'sft/quant_sft_v1.jsonl',
+    subjectName: 'sft/quant_sft_v1.manifest.json',
     subjectBody: res.manifest,
     predicate: { export: res.manifest },
     privateKey, publicKey,
