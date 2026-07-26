@@ -1,0 +1,165 @@
+name: Nemo v3 Exact Engine-Signing Handoff
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - authorizations/nemo-v3-20260722-exact.json
+      - tools/nemo-v3-exact-signing-handoff.mjs
+      - test/nemo-v3-signing-handoff.test.mjs
+      - package.json
+      - .github/workflows/nemo-v3-exact-signing-handoff.yml
+  push:
+    branches: [main]
+    paths:
+      - authorizations/nemo-v3-20260722-exact.json
+      - tools/nemo-v3-exact-signing-handoff.mjs
+      - test/nemo-v3-signing-handoff.test.mjs
+      - package.json
+      - .github/workflows/nemo-v3-exact-signing-handoff.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nemo-v3-exact-signing-handoff-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BRIDGE_REVISION: a14c417d8bcb52ff7b4cba43d656c6858fc93c4c
+  AUTHORIZATION_PATH: authorizations/nemo-v3-20260722-exact.json
+  OUTPUT_ROOT: dist/nemo-v3-exact-signing-handoff
+
+jobs:
+  verify:
+    name: Credentialless exact-spec and DSSE boundary verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout proposed authorization controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout the exact reviewed GPU bridge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: szl-holdings/szl-gpu-bridge
+          ref: ${{ env.BRIDGE_REVISION }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: bridge
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Compile and test the exact authorization boundary
+        env:
+          BRIDGE_ROOT: ${{ github.workspace }}/bridge
+        run: |
+          set -euo pipefail
+          node --check tools/nemo-v3-exact-signing-handoff.mjs
+          node --test test/nemo-v3-signing-handoff.test.mjs
+          test "$(git -C bridge rev-parse HEAD)" = "$BRIDGE_REVISION"
+          git diff --check
+
+  sign-exact-reviewed-job:
+    name: Artifact-only engine signature for one reviewed job
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'szl-holdings/szl-quant'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout protected authorization controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout the exact reviewed GPU bridge
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: szl-holdings/szl-gpu-bridge
+          ref: ${{ env.BRIDGE_REVISION }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: bridge
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Authorize exactly one preregistered DSSE envelope
+        env:
+          SIGNING_KEY_PEM: ${{ secrets.SZL_QUANT_SIGNING_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_path="$RUNNER_TEMP/nemo-v3-engine-key.pem"
+          cleanup() {
+            unset SZL_QUANT_KEY SIGNING_KEY_PEM
+            if command -v shred >/dev/null 2>&1; then
+              shred -u "$key_path" 2>/dev/null || rm -f "$key_path"
+            else
+              rm -f "$key_path"
+            fi
+          }
+          trap cleanup EXIT HUP INT TERM
+          if [ -z "${SIGNING_KEY_PEM:-}" ]; then
+            echo "::error::SZL_QUANT_SIGNING_KEY_PEM is missing; refusing unsigned handoff."
+            exit 2
+          fi
+          printf '%s\n' "$SIGNING_KEY_PEM" > "$key_path"
+          chmod 600 "$key_path"
+          export SZL_QUANT_KEY="$key_path"
+
+          node bridge/cloud/sign-nemo-v3-job.mjs \
+            "bridge/jobspecs/nemo-v3-20260722-reviewed.json"
+          unset SZL_QUANT_KEY SIGNING_KEY_PEM
+
+          node tools/nemo-v3-exact-signing-handoff.mjs \
+            --authorization "$AUTHORIZATION_PATH" \
+            --bridge-root bridge \
+            --output-root "$OUTPUT_ROOT"
+
+          test "$(find "$OUTPUT_ROOT" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2"
+          test -f "$OUTPUT_ROOT/job-2026-nemo-v3-governed-attempt-1.json"
+          test -f "$OUTPUT_ROOT/nemo-v3-signing-handoff.receipt.json"
+          grep -q '"state": "ENGINE_SIGNED_QUEUE_ARTIFACT_READY_FOR_PROTECTED_IMPORT"' \
+            "$OUTPUT_ROOT/nemo-v3-signing-handoff.receipt.json"
+          grep -q '"valueRecorded": false' \
+            "$OUTPUT_ROOT/nemo-v3-signing-handoff.receipt.json"
+
+      - name: Upload immutable engine-signing handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nemo-v3-exact-engine-signing-${{ github.run_id }}
+          path: ${{ env.OUTPUT_ROOT }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish bounded job summary
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = json.loads(
+              Path(os.environ["OUTPUT_ROOT"], "nemo-v3-signing-handoff.receipt.json")
+              .read_text(encoding="utf-8")
+          )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("## SZL-Nemo v3 exact engine-signing handoff\n\n")
+              out.write(f"- state: `{receipt['state']}`\n")
+              out.write(f"- job: `{receipt['job']['id']}`\n")
+              out.write(f"- engine key ID: `{receipt['job']['engineKeyId']}`\n")
+              out.write(f"- payload SHA-256: `{receipt['job']['payloadSha256']}`\n")
+              out.write(f"- envelope SHA-256: `{receipt['job']['envelopeSha256']}`\n")
+              out.write("- private-key value recorded: `false`\n")
+              out.write("- training executed: `false`\n")
+              out.write("- cross-repository write: `false`\n")

@@ -1,0 +1,43 @@
+{
+  "schema": "szl.nemo-v3-signing-authorization/v1",
+  "authorizationId": "nemo-v3-20260722-exact-single-attempt",
+  "jobId": "job-2026-nemo-v3-governed-attempt-1",
+  "expiresAt": "2026-08-05T16:30:00Z",
+  "bridge": {
+    "repository": "szl-holdings/szl-gpu-bridge",
+    "revision": "a14c417d8bcb52ff7b4cba43d656c6858fc93c4c",
+    "signerPath": "cloud/sign-nemo-v3-job.mjs",
+    "signerGitBlob": "5f6b1f5edd290316347e3dcc5afcef07f3a37b46",
+    "specPath": "jobspecs/nemo-v3-20260722-reviewed.json",
+    "specGitBlob": "ff8c3b76fff8ecffa7165bab3bbd4b7657c2a8d8",
+    "enginePublicKeyPath": "keys/engine_pubkey.json",
+    "enginePublicKeyGitBlob": "44515ae6b96312f2a1d51806c1e2ef1d43d6237f",
+    "queuePath": "queue/pending/job-2026-nemo-v3-governed-attempt-1.json"
+  },
+  "payload": {
+    "type": "application/vnd.szl.gpu-bridge.nemo-v3.jobspec.v1+json",
+    "canonicalSha256": "8a5c2e3f99711be84e45371824ca737d480e587ff61c55cc3d30ad96d2c62055",
+    "sourceRepository": "szl-holdings/a11oy",
+    "sourceRevision": "a5351c8e37a7cfe54e0c3cf53c8bbd460a16c11c",
+    "baseRepository": "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+    "baseRevision": "dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f",
+    "requiredPassRate": 1.0,
+    "maxDegenerateRate": 0.0,
+    "automaticRetry": false,
+    "publishCandidate": false
+  },
+  "engine": {
+    "keyId": "5c6cf59741ade920",
+    "publicKeySpkiBase64": "MCowBQYDK2VwAyEArBOmZZSDK+n7Qq1HJYbqNuX9YymnsRWbzSGHHnhsERM="
+  },
+  "effects": {
+    "signExactReviewedPayload": true,
+    "artifactOnly": true,
+    "crossRepositoryWrite": false,
+    "training": false,
+    "candidateUpload": false,
+    "publication": false,
+    "deployment": false,
+    "promotion": false
+  }
+}
