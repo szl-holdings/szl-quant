@@ -17,28 +17,39 @@ on:
       - test/nemo-v3-signing-handoff.test.mjs
       - package.json
       - .github/workflows/nemo-v3-exact-signing-handoff.yml
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: nemo-v3-exact-signing-handoff-${{ github.ref }}
+  group: nemo-v3-exact-signing-handoff-${{ github.event.workflow_run.id || github.ref }}
   cancel-in-progress: false
 
 env:
   BRIDGE_REVISION: a14c417d8bcb52ff7b4cba43d656c6858fc93c4c
+  CONTROLLER_REVISION: 5935a7a8dd2d9ac663c81b7d906646c881f86af3
   AUTHORIZATION_PATH: authorizations/nemo-v3-20260722-exact.json
   OUTPUT_ROOT: dist/nemo-v3-exact-signing-handoff
 
 jobs:
   verify:
     name: Credentialless exact-spec and DSSE boundary verification
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.id == 30221331033 &&
+       github.event.workflow_run.head_sha == 'fef67fc4bde6d51b822eff120bf5edbe0c53e9c6' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout proposed authorization controller
+      - name: Checkout the exact reviewed authorization controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event_name == 'workflow_run' && env.CONTROLLER_REVISION || github.sha }}
           persist-credentials: false
           fetch-depth: 1
 
@@ -63,19 +74,28 @@ jobs:
           set -euo pipefail
           node --check tools/nemo-v3-exact-signing-handoff.mjs
           node --test test/nemo-v3-signing-handoff.test.mjs
+          test "$(git rev-parse HEAD)" = "${{ github.event_name == 'workflow_run' && env.CONTROLLER_REVISION || github.sha }}"
           test "$(git -C bridge rev-parse HEAD)" = "$BRIDGE_REVISION"
           git diff --check
 
   sign-exact-reviewed-job:
     name: Artifact-only engine signature for one reviewed job
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'szl-holdings/szl-quant'
+    if: >-
+      github.repository == 'szl-holdings/szl-quant' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.id == 30221331033 &&
+        github.event.workflow_run.head_sha == 'fef67fc4bde6d51b822eff120bf5edbe0c53e9c6' &&
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'success'))
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout protected authorization controller
+      - name: Checkout the exact protected authorization controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event_name == 'workflow_run' && env.CONTROLLER_REVISION || github.sha }}
           persist-credentials: false
           fetch-depth: 1
 
