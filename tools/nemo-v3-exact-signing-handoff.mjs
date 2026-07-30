@@ -23,6 +23,47 @@ import { fileURLToPath } from 'node:url';
 export const AUTH_SCHEMA = 'szl.nemo-v3-signing-authorization/v1';
 export const RECEIPT_SCHEMA = 'szl.nemo-v3-signing-handoff/v1';
 export const READY_STATE = 'ENGINE_SIGNED_QUEUE_ARTIFACT_READY_FOR_PROTECTED_IMPORT';
+export const ADMITTED_AUTHORIZATIONS = Object.freeze({
+  'nemo-v3-20260722-exact-single-attempt': Object.freeze({
+    jobId: 'job-2026-nemo-v3-governed-attempt-1',
+    expiresAt: '2026-08-05T16:30:00Z',
+    bridgeRevision: 'a14c417d8bcb52ff7b4cba43d656c6858fc93c4c',
+    signerGitBlob: '5f6b1f5edd290316347e3dcc5afcef07f3a37b46',
+    specPath: 'jobspecs/nemo-v3-20260722-reviewed.json',
+    specGitBlob: 'ff8c3b76fff8ecffa7165bab3bbd4b7657c2a8d8',
+    queuePath: 'queue/pending/job-2026-nemo-v3-governed-attempt-1.json',
+    canonicalSha256: '8a5c2e3f99711be84e45371824ca737d480e587ff61c55cc3d30ad96d2c62055',
+    sourceRevision: 'a5351c8e37a7cfe54e0c3cf53c8bbd460a16c11c',
+    ownerDispatch: undefined,
+  }),
+  'nemo-v3-20260729-attempt-2-b21-exact-single-attempt': Object.freeze({
+    jobId: 'job-2026-nemo-v3-governed-attempt-2',
+    expiresAt: '2026-08-12T23:08:49Z',
+    bridgeRevision: '6d59b0efe448505c6206306874a255f7d426eb2c',
+    signerGitBlob: '997e9c0e5d6f4ab273ceff88d33b4bc0cfdad700',
+    specPath: 'jobspecs/nemo-v3-20260729-attempt-2-reviewed.json',
+    specGitBlob: '7c15bce93f23061306cbbc7d166adf9e06287ae6',
+    queuePath: 'queue/pending/job-2026-nemo-v3-governed-attempt-2.json',
+    canonicalSha256: '84a808615ba1693935eee8cc9fa1a4c5a83d119b79ad7e9437380ec73756b90d',
+    sourceRevision: 'b21b8fb65400e7eb39595365c5f54c80ed78aa67',
+    ownerDispatch: Object.freeze({
+      workflowIdentity: 'szl-holdings/a11oy/.github/workflows/nemo-v3-isolated-owner-dispatch.yml@refs/heads/main',
+      workflowBlob: '7e08ffc8aa87b78d0fa1618d7d3c3e68cb81ca33',
+      workflowVersion: 'nemo-v3-owner-dispatch.v2',
+      trainingImage: 'unsloth/unsloth@sha256:9cc97606fc386b4b13455285eb7bd2668f51530988a9c2578707fe6cdfc46123',
+      candidateUpload: false,
+      modelCardUpload: false,
+      datasetUpload: false,
+      receiptsRepoId: 'SZLHOLDINGS/szl-training-receipts',
+    }),
+  }),
+});
+
+const BRIDGE_REPOSITORY = 'szl-holdings/szl-gpu-bridge';
+const ENGINE_KEY_ID = '5c6cf59741ade920';
+const ENGINE_PUBLIC_KEY_SPKI = 'MCowBQYDK2VwAyEArBOmZZSDK+n7Qq1HJYbqNuX9YymnsRWbzSGHHnhsERM=';
+const ENGINE_PUBLIC_KEY_GIT_BLOB = '44515ae6b96312f2a1d51806c1e2ef1d43d6237f';
+const PAYLOAD_TYPE = 'application/vnd.szl.gpu-bridge.nemo-v3.jobspec.v1+json';
 
 export function canonicalize(value) {
   if (value === null || typeof value === 'number' || typeof value === 'boolean') {
@@ -68,6 +109,14 @@ function equal(actual, expected, label) {
   }
 }
 
+function exactKeys(value, expected, label) {
+  const observed = Object.keys(object(value, label)).sort();
+  const admitted = [...expected].sort();
+  if (JSON.stringify(observed) !== JSON.stringify(admitted)) {
+    throw new Error(`${label} fields must be exact`);
+  }
+}
+
 function decodeBase64(value, label) {
   if (typeof value !== 'string' || value.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
     throw new Error(`${label} must be canonical non-empty base64`);
@@ -88,12 +137,73 @@ function git(root, ...args) {
 
 export function validateAuthorization(authorization) {
   object(authorization, 'authorization');
+  exactKeys(
+    authorization,
+    ['schema', 'authorizationId', 'jobId', 'expiresAt', 'bridge', 'payload', 'engine', 'effects'],
+    'authorization',
+  );
   equal(authorization.schema, AUTH_SCHEMA, 'authorization.schema');
-  equal(authorization.authorizationId, 'nemo-v3-20260722-exact-single-attempt', 'authorization.authorizationId');
-  equal(authorization.jobId, 'job-2026-nemo-v3-governed-attempt-1', 'authorization.jobId');
-  equal(authorization.bridge.repository, 'szl-holdings/szl-gpu-bridge', 'bridge.repository');
-  equal(authorization.payload.type, 'application/vnd.szl.gpu-bridge.nemo-v3.jobspec.v1+json', 'payload.type');
-  equal(authorization.engine.keyId, '5c6cf59741ade920', 'engine.keyId');
+  const admitted = ADMITTED_AUTHORIZATIONS[authorization.authorizationId];
+  if (!admitted) {
+    throw new Error(`authorization.authorizationId is not admitted: ${authorization.authorizationId}`);
+  }
+  equal(authorization.jobId, admitted.jobId, 'authorization.jobId');
+  equal(authorization.expiresAt, admitted.expiresAt, 'authorization.expiresAt');
+
+  exactKeys(
+    authorization.bridge,
+    [
+      'repository', 'revision', 'signerPath', 'signerGitBlob', 'specPath',
+      'specGitBlob', 'enginePublicKeyPath', 'enginePublicKeyGitBlob', 'queuePath',
+    ],
+    'bridge',
+  );
+  equal(authorization.bridge.repository, BRIDGE_REPOSITORY, 'bridge.repository');
+  equal(authorization.bridge.revision, admitted.bridgeRevision, 'bridge.revision');
+  equal(authorization.bridge.signerPath, 'cloud/sign-nemo-v3-job.mjs', 'bridge.signerPath');
+  equal(authorization.bridge.signerGitBlob, admitted.signerGitBlob, 'bridge.signerGitBlob');
+  equal(authorization.bridge.specPath, admitted.specPath, 'bridge.specPath');
+  equal(authorization.bridge.specGitBlob, admitted.specGitBlob, 'bridge.specGitBlob');
+  equal(authorization.bridge.enginePublicKeyPath, 'keys/engine_pubkey.json', 'bridge.enginePublicKeyPath');
+  equal(authorization.bridge.enginePublicKeyGitBlob, ENGINE_PUBLIC_KEY_GIT_BLOB, 'bridge.enginePublicKeyGitBlob');
+  equal(authorization.bridge.queuePath, admitted.queuePath, 'bridge.queuePath');
+
+  const payloadFields = [
+    'type', 'canonicalSha256', 'sourceRepository', 'sourceRevision',
+    'baseRepository', 'baseRevision', 'requiredPassRate', 'maxDegenerateRate',
+    'automaticRetry', 'publishCandidate',
+  ];
+  if (admitted.ownerDispatch) payloadFields.push('ownerDispatch');
+  exactKeys(authorization.payload, payloadFields, 'payload');
+  equal(authorization.payload.type, PAYLOAD_TYPE, 'payload.type');
+  equal(authorization.payload.canonicalSha256, admitted.canonicalSha256, 'payload.canonicalSha256');
+  equal(authorization.payload.sourceRepository, 'szl-holdings/a11oy', 'payload.sourceRepository');
+  equal(authorization.payload.sourceRevision, admitted.sourceRevision, 'payload.sourceRevision');
+  equal(authorization.payload.baseRepository, 'nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16', 'payload.baseRepository');
+  equal(authorization.payload.baseRevision, 'dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f', 'payload.baseRevision');
+  equal(authorization.payload.requiredPassRate, 1, 'payload.requiredPassRate');
+  equal(authorization.payload.maxDegenerateRate, 0, 'payload.maxDegenerateRate');
+  equal(authorization.payload.automaticRetry, false, 'payload.automaticRetry');
+  equal(authorization.payload.publishCandidate, false, 'payload.publishCandidate');
+  if (admitted.ownerDispatch) {
+    exactKeys(authorization.payload.ownerDispatch, Object.keys(admitted.ownerDispatch), 'payload.ownerDispatch');
+    for (const [field, expected] of Object.entries(admitted.ownerDispatch)) {
+      equal(authorization.payload.ownerDispatch[field], expected, `payload.ownerDispatch.${field}`);
+    }
+  }
+
+  exactKeys(authorization.engine, ['keyId', 'publicKeySpkiBase64'], 'engine');
+  equal(authorization.engine.keyId, ENGINE_KEY_ID, 'engine.keyId');
+  equal(authorization.engine.publicKeySpkiBase64, ENGINE_PUBLIC_KEY_SPKI, 'engine.publicKeySpkiBase64');
+
+  exactKeys(
+    authorization.effects,
+    [
+      'signExactReviewedPayload', 'artifactOnly', 'crossRepositoryWrite', 'training',
+      'candidateUpload', 'publication', 'deployment', 'promotion',
+    ],
+    'effects',
+  );
   equal(authorization.effects.signExactReviewedPayload, true, 'effects.signExactReviewedPayload');
   equal(authorization.effects.artifactOnly, true, 'effects.artifactOnly');
   for (const field of [
@@ -125,11 +235,25 @@ export function validateExactSpec(spec, authorization) {
   equal(spec.evaluation.requireExactRecordOrder, true, 'spec.evaluation.requireExactRecordOrder');
   equal(spec.outputs.publishCandidate, authorization.payload.publishCandidate, 'spec.outputs.publishCandidate');
   equal(spec.outputs.private, true, 'spec.outputs.private');
-  equal(authorization.payload.automaticRetry, false, 'payload.automaticRetry');
   equal(spec.dataset.rightsBasis, 'PROJECT_AUTHORED_SCENARIOS', 'spec.dataset.rightsBasis');
   equal(spec.dataset.holdouts.length, 3, 'spec.dataset.holdouts.length');
   equal(spec.gates.maxTemperatureC, 78, 'spec.gates.maxTemperatureC');
   equal(spec.gates.maxUtilizationPct, 15, 'spec.gates.maxUtilizationPct');
+  if (authorization.payload.ownerDispatch) {
+    exactKeys(
+      spec.ownerDispatch,
+      Object.keys(authorization.payload.ownerDispatch),
+      'spec.ownerDispatch',
+    );
+    for (const [field, expected] of Object.entries(authorization.payload.ownerDispatch)) {
+      equal(spec.ownerDispatch[field], expected, `spec.ownerDispatch.${field}`);
+    }
+    equal(spec.outputs.receiptsRepoId, authorization.payload.ownerDispatch.receiptsRepoId, 'spec.outputs.receiptsRepoId');
+    equal(spec.lineage.automaticRetry, false, 'spec.lineage.automaticRetry');
+    equal(spec.lineage.successorGeneration, 2, 'spec.lineage.successorGeneration');
+  } else if (spec.ownerDispatch !== undefined) {
+    throw new Error('spec.ownerDispatch is not admitted by this authorization');
+  }
   return spec;
 }
 
@@ -229,6 +353,9 @@ export function verifyHandoff({ authorizationPath, bridgeRoot, outputRoot, now =
       requiredPassRate: authorization.payload.requiredPassRate,
       maxDegenerateRate: authorization.payload.maxDegenerateRate,
       publishCandidate: false,
+      ...(authorization.payload.ownerDispatch
+        ? { ownerDispatch: authorization.payload.ownerDispatch }
+        : {}),
     },
     output: {
       artifactOnly: true,

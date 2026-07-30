@@ -5,51 +5,45 @@ on:
     branches: [main]
     paths:
       - authorizations/nemo-v3-20260722-exact.json
+      - authorizations/nemo-v3-20260729-attempt-2-exact.json
       - tools/nemo-v3-exact-signing-handoff.mjs
       - test/nemo-v3-signing-handoff.test.mjs
+      - docs/NEMO_V3_EXACT_SIGNING_HANDOFF.md
       - package.json
       - .github/workflows/nemo-v3-exact-signing-handoff.yml
   push:
     branches: [main]
     paths:
       - authorizations/nemo-v3-20260722-exact.json
+      - authorizations/nemo-v3-20260729-attempt-2-exact.json
       - tools/nemo-v3-exact-signing-handoff.mjs
       - test/nemo-v3-signing-handoff.test.mjs
+      - docs/NEMO_V3_EXACT_SIGNING_HANDOFF.md
       - package.json
       - .github/workflows/nemo-v3-exact-signing-handoff.yml
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: nemo-v3-exact-signing-handoff-${{ github.event.workflow_run.id || github.ref }}
+  group: nemo-v3-exact-signing-handoff-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  BRIDGE_REVISION: a14c417d8bcb52ff7b4cba43d656c6858fc93c4c
-  CONTROLLER_REVISION: 5935a7a8dd2d9ac663c81b7d906646c881f86af3
-  AUTHORIZATION_PATH: authorizations/nemo-v3-20260722-exact.json
+  BRIDGE_REVISION: 6d59b0efe448505c6206306874a255f7d426eb2c
+  AUTHORIZATION_PATH: authorizations/nemo-v3-20260729-attempt-2-exact.json
   OUTPUT_ROOT: dist/nemo-v3-exact-signing-handoff
 
 jobs:
   verify:
     name: Credentialless exact-spec and DSSE boundary verification
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.id == 30221331033 &&
-       github.event.workflow_run.head_sha == 'fef67fc4bde6d51b822eff120bf5edbe0c53e9c6' &&
-       github.event.workflow_run.event == 'pull_request' &&
-       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout the exact reviewed authorization controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event_name == 'workflow_run' && env.CONTROLLER_REVISION || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
 
@@ -74,7 +68,7 @@ jobs:
           set -euo pipefail
           node --check tools/nemo-v3-exact-signing-handoff.mjs
           node --test test/nemo-v3-signing-handoff.test.mjs
-          test "$(git rev-parse HEAD)" = "${{ github.event_name == 'workflow_run' && env.CONTROLLER_REVISION || github.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
           test "$(git -C bridge rev-parse HEAD)" = "$BRIDGE_REVISION"
           git diff --check
 
@@ -82,12 +76,8 @@ jobs:
     name: Artifact-only engine signature for one reviewed job
     if: >-
       github.repository == 'szl-holdings/szl-quant' &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-       (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.id == 30221331033 &&
-        github.event.workflow_run.head_sha == 'fef67fc4bde6d51b822eff120bf5edbe0c53e9c6' &&
-        github.event.workflow_run.event == 'pull_request' &&
-        github.event.workflow_run.conclusion == 'success'))
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -95,7 +85,7 @@ jobs:
       - name: Checkout the exact protected authorization controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event_name == 'workflow_run' && env.CONTROLLER_REVISION || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
 
@@ -138,7 +128,7 @@ jobs:
           export SZL_QUANT_KEY="$key_path"
 
           node bridge/cloud/sign-nemo-v3-job.mjs \
-            "bridge/jobspecs/nemo-v3-20260722-reviewed.json"
+            "bridge/jobspecs/nemo-v3-20260729-attempt-2-reviewed.json"
           unset SZL_QUANT_KEY SIGNING_KEY_PEM
 
           node tools/nemo-v3-exact-signing-handoff.mjs \
@@ -147,7 +137,7 @@ jobs:
             --output-root "$OUTPUT_ROOT"
 
           test "$(find "$OUTPUT_ROOT" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2"
-          test -f "$OUTPUT_ROOT/job-2026-nemo-v3-governed-attempt-1.json"
+          test -f "$OUTPUT_ROOT/job-2026-nemo-v3-governed-attempt-2.json"
           test -f "$OUTPUT_ROOT/nemo-v3-signing-handoff.receipt.json"
           grep -q '"state": "ENGINE_SIGNED_QUEUE_ARTIFACT_READY_FOR_PROTECTED_IMPORT"' \
             "$OUTPUT_ROOT/nemo-v3-signing-handoff.receipt.json"

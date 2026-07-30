@@ -4,17 +4,25 @@
 
 This repository already uses the engine private key in a protected GitHub Actions secret to sign doctrine-governed paper-research receipts. The public key pinned here is byte-identical to the engine key pinned by `szl-holdings/szl-gpu-bridge`.
 
-The Nemo v3 handoff uses that existing trust root for **one exact preregistered job**. It is not a general CI signing API and it does not move the private key into another repository.
+The Nemo v3 handoff uses that existing trust root for **one exact preregistered job at a time**. It is not a general CI signing API and it does not move the private key into another repository.
 
 ## Exact authorization
 
-The only admitted authorization is:
+The controller admits two immutable authorization records:
 
 ```text
 authorizations/nemo-v3-20260722-exact.json
+authorizations/nemo-v3-20260729-attempt-2-exact.json
 ```
 
-It pins all of the following:
+The first record is the completed attempt-1 signing boundary and remains admitted
+only so its historical verification stays reproducible. The protected-main
+workflow is currently pinned to the attempt-2 record. It binds the settled A11oy
+source `b21b8fb65400e7eb39595365c5f54c80ed78aa67`, its exact owner-dispatch
+workflow blob, immutable training image, disabled uploads, and receipts
+repository.
+
+Each admitted record pins all of the following:
 
 - authorization ID and single job ID;
 - expiration time;
@@ -30,7 +38,10 @@ It pins all of the following:
 - candidate publication disabled;
 - no training, deployment, promotion, or cross-repository write by the signer.
 
-Changing any of those fields requires a new reviewed authorization and protected pull request.
+The verifier contains a closed allowlist for the exact authorization/job/source
+pairs. Swapping fields between attempts, adding an authorization, or changing
+any pinned field requires a new reviewed authorization and protected pull
+request.
 
 ## Two-stage workflow
 
@@ -40,7 +51,7 @@ The pull-request job is credentialless. It checks out the exact reviewed bridge 
 
 ### Protected main
 
-Only the protected `main` push created by merging the reviewed change may run the signing job. The job:
+Only the protected `main` push created by merging the reviewed change may run the signing job. There is no historical `workflow_run` replay path. The job:
 
 1. checks out the exact pinned bridge commit;
 2. materializes `SZL_QUANT_SIGNING_KEY_PEM` into a mode-0600 runner-temporary file;
