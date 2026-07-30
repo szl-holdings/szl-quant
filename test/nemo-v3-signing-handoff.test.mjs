@@ -7,6 +7,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   AUTH_SCHEMA,
@@ -20,19 +21,24 @@ import {
   verifyPinnedBridgeTree,
 } from '../tools/nemo-v3-exact-signing-handoff.mjs';
 
-const ROOT = resolve(new URL('..', import.meta.url).pathname);
-const AUTH_PATH = join(ROOT, 'authorizations', 'nemo-v3-20260722-exact.json');
+const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const ATTEMPT_1_AUTH_PATH = join(ROOT, 'authorizations', 'nemo-v3-20260722-exact.json');
+const ATTEMPT_2_AUTH_PATH = join(
+  ROOT,
+  'authorizations',
+  'nemo-v3-20260729-attempt-2-exact.json',
+);
 
-function loadAuthorization() {
-  return JSON.parse(readFileSync(AUTH_PATH, 'utf8'));
+function loadAuthorization(path = ATTEMPT_2_AUTH_PATH) {
+  return JSON.parse(readFileSync(path, 'utf8'));
 }
 
 function idsDigest(ids) {
   return createHash('sha256').update(`${ids.join('\n')}\n`).digest('hex');
 }
 
-test('authorization is one exact artifact-only attempt', () => {
-  const authorization = validateAuthorization(loadAuthorization());
+test('predecessor authorization remains one exact artifact-only attempt', () => {
+  const authorization = validateAuthorization(loadAuthorization(ATTEMPT_1_AUTH_PATH));
   assert.equal(authorization.schema, AUTH_SCHEMA);
   assert.equal(authorization.jobId, 'job-2026-nemo-v3-governed-attempt-1');
   assert.equal(authorization.bridge.revision, 'a14c417d8bcb52ff7b4cba43d656c6858fc93c4c');
@@ -50,10 +56,49 @@ test('authorization is one exact artifact-only attempt', () => {
   });
 });
 
+test('successor authorization pins exact b21 owner-dispatch attempt', () => {
+  const authorization = validateAuthorization(loadAuthorization());
+  assert.equal(authorization.schema, AUTH_SCHEMA);
+  assert.equal(authorization.jobId, 'job-2026-nemo-v3-governed-attempt-2');
+  assert.equal(authorization.bridge.revision, '6d59b0efe448505c6206306874a255f7d426eb2c');
+  assert.equal(
+    authorization.payload.canonicalSha256,
+    '84a808615ba1693935eee8cc9fa1a4c5a83d119b79ad7e9437380ec73756b90d',
+  );
+  assert.equal(
+    authorization.payload.sourceRevision,
+    'b21b8fb65400e7eb39595365c5f54c80ed78aa67',
+  );
+  assert.deepEqual(authorization.payload.ownerDispatch, {
+    workflowIdentity: 'szl-holdings/a11oy/.github/workflows/nemo-v3-isolated-owner-dispatch.yml@refs/heads/main',
+    workflowBlob: '7e08ffc8aa87b78d0fa1618d7d3c3e68cb81ca33',
+    workflowVersion: 'nemo-v3-owner-dispatch.v2',
+    trainingImage: 'unsloth/unsloth@sha256:9cc97606fc386b4b13455285eb7bd2668f51530988a9c2578707fe6cdfc46123',
+    candidateUpload: false,
+    modelCardUpload: false,
+    datasetUpload: false,
+    receiptsRepoId: 'SZLHOLDINGS/szl-training-receipts',
+  });
+});
+
 test('authorization refuses any effect expansion', () => {
   const authorization = loadAuthorization();
   authorization.effects.crossRepositoryWrite = true;
   assert.throws(() => validateAuthorization(authorization), /crossRepositoryWrite/);
+});
+
+test('authorization refuses cross-attempt identity substitution', () => {
+  const authorization = loadAuthorization();
+  authorization.jobId = 'job-2026-nemo-v3-governed-attempt-1';
+  assert.throws(() => validateAuthorization(authorization), /authorization.jobId/);
+
+  const sourceTampered = loadAuthorization();
+  sourceTampered.payload.sourceRevision = 'a5351c8e37a7cfe54e0c3cf53c8bbd460a16c11c';
+  assert.throws(() => validateAuthorization(sourceTampered), /payload.sourceRevision/);
+
+  const dispatchExpanded = loadAuthorization();
+  dispatchExpanded.payload.ownerDispatch.candidateUpload = true;
+  assert.throws(() => validateAuthorization(dispatchExpanded), /candidateUpload/);
 });
 
 test('exact bridge revision, signer, spec, and engine pin match the reviewed tree', {
@@ -143,6 +188,8 @@ test('workflow is PR-credentialless and protected-main artifact-only', () => {
   assert.doesNotMatch(workflow, /git push/);
   assert.doesNotMatch(workflow, /contents:\s*write/);
   assert.doesNotMatch(workflow, /workflow_dispatch/);
+  assert.match(workflow, /nemo-v3-20260729-attempt-2-exact\.json/);
+  assert.match(workflow, /job-2026-nemo-v3-governed-attempt-2\.json/);
   assert.match(workflow, new RegExp(READY_STATE));
 });
 
