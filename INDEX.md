@@ -9,17 +9,17 @@ Verify any entry independently:
 node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir ledger/<run-dir>/
 ```
 
-Runs recorded: 150 · receipts: 1626 (MEASURED from files present; cron is best-effort, gaps are honest)
+Runs recorded: 151 · receipts: 1637 (MEASURED from files present; cron is best-effort, gaps are honest)
 
-Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=444 — a past frequency, NOT a prediction
+Track record (latest, MEASURED from verified receipts only): +1d n=0 hit=— pending=0 · +7d n=0 hit=— pending=0 · no-calls(BLOCKED)=445 — a past frequency, NOT a prediction
 
-Hash chain: 148 link(s), head seq 148 sha256 4c2fbe9518f2… — every sealed run tamper-evident; walk it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/`
+Hash chain: 149 link(s), head seq 149 sha256 d61682d41515… — every sealed run tamper-evident; walk it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --chain ledger/`
 
-Paper book (MODELED, paper-only — NOT real funds): seq 142 · equity $10000.000000 · open positions 0 · fills this run 0 · replay it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --book ledger/`
+Paper book (MODELED, paper-only — NOT real funds): seq 143 · equity $10000.000000 · open positions 0 · fills this run 0 · replay it: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --book ledger/`
 
-Refusal record (MEASURED): latest run BLOCKED 2/6 — liquidity×2 · lifetime (recorded runs) 409/846 — liquidity×291 conviction×129 · a refusal is a decision, not an absence · replay: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/`
+Refusal record (MEASURED): latest run BLOCKED 1/6 — liquidity×1 · lifetime (recorded runs) 410/852 — liquidity×292 conviction×129 · a refusal is a decision, not an absence · replay: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --refusals ledger/`
 
-External witness (REPORTED, SET + Merkle inclusion + log consistency offline-verifiable): chain head seq 148 anchored in Rekor — logIndex 2515781459, uuid 108e9186e8c5677a… · heads anchored 148/148 · inclusion proven offline 148/148 · log consistency 147/147 adjacent checkpoint pair(s) receipted · second witness (RFC 3161) 148/148 head(s) countersigned · cross-witness gossip 135 observation(s) from a second scheduled observer · an anchored head cannot be silently truncated · check: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .`
+External witness (REPORTED, SET + Merkle inclusion + log consistency offline-verifiable): chain head seq 149 anchored in Rekor — logIndex 2519386385, uuid 108e9186e8c5677a… · heads anchored 149/149 · inclusion proven offline 149/149 · log consistency 148/148 adjacent checkpoint pair(s) receipted · second witness (RFC 3161) 149/149 head(s) countersigned · cross-witness gossip 136 observation(s) from a second scheduled observer · an anchored head cannot be silently truncated · check: `node verify/verify.mjs --pubkey keys/engine_pubkey.json --witness .`
 
 | run (UTC) | receipts |
 |---|---|
@@ -173,5 +173,6 @@ External witness (REPORTED, SET + Merkle inclusion + log consistency offline-ver
 | 20260819T015659Z_run149 | 11 |
 | 20260819T071034Z_run150 | 11 |
 | 20260819T131439Z_run151 | 11 |
+| 20260819T185804Z_run152 | 11 |
 
 _Advisory research output. NOT financial advice. No execution, no custody._
