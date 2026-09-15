@@ -1,5 +1,4 @@
-# CI for szl-quant — unit tests + receipt verification.
-# All actions pinned to full-length commit SHAs (org convention).
+# CI for szl-quant — full tests and unchanged pinned receipt verification.
 name: ci
 on:
   push:
@@ -12,17 +11,47 @@ permissions:
 jobs:
   test-and-verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
-      - name: Unit tests (doctrine invariants, DSSE, gates, determinism)
-        run: node --test test/engine.test.mjs
-      - name: Verify committed receipts against pinned engine pubkey
+      - name: Bind source and runtime
+        shell: bash
         run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p qualification-evidence
+          node --version > qualification-evidence/node-version.txt
+          git archive --format=tar HEAD | gzip -n > qualification-evidence/source.tar.gz
+          printf '%s\n' "$SOURCE_REVISION" > qualification-evidence/source-revision.txt
+          printf '%s\n' "$GITHUB_SHA" > qualification-evidence/workflow-event-revision.txt
+          sha256sum qualification-evidence/source.tar.gz > qualification-evidence/source.sha256
+      - name: Full unit suite including point-in-time scoring regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test 2>&1 | tee qualification-evidence/unit-tests.log
+      - name: Verify committed receipts against pinned engine pubkey
+        shell: bash
+        run: |
+          set -euo pipefail
           if ls receipts/*.json >/dev/null 2>&1; then
-            node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
+            node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/ | tee qualification-evidence/receipt-verification.log
           else
-            echo "no receipts committed yet — nothing to verify (honest empty)"
+            echo 'no receipts committed yet — nothing to verify (honest empty)' | tee qualification-evidence/receipt-verification.log
           fi
+      - name: Retain source qualification evidence, never a trading admission
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: quant-source-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qualification-evidence/
+          if-no-files-found: error
+          retention-days: 30
