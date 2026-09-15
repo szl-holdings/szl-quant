@@ -75,3 +75,29 @@ export function decideLive({ pair, history, params = DEFAULT_PARAMS, limits = DE
 }
 
 export { makeLoopTaxLedger, chargeLoopTax };
+
+/** Research-only preflight for the existing A11oy/Hatun agent boundary.
+ * Uses ingestion-supplied temporal records and an independently maintained
+ * compute-budget snapshot. Never pass an agent's guessed timestamps as evidence.
+ * REVIEW requests further review; it does not authenticate inputs, grant paper
+ * fills, sign a receipt, reserve budget, or permit real-money execution.
+ */
+export async function reviewResearchInputs({ observations, decisionAtMs, maxEventAgeMs, researchBudget } = {}) {
+  const { pointInTimeGate, researchBudgetGate } = await import('./gates.mjs');
+  const result = runGates([
+    postureGate(), pointInTimeGate(observations, decisionAtMs, maxEventAgeMs),
+    researchBudgetGate(researchBudget),
+  ]);
+  return {
+    schema: 'szl.quant.research-preflight/v1',
+    disposition: result.verdict === VERDICTS.ALLOWED ? 'REVIEW' : 'ABSTAIN',
+    gates: result.gates,
+    blockedBy: result.blockedBy,
+    canonicalPaperEngine: 'szl-holdings/szl-quant',
+    evidenceAuthenticationVerified: false,
+    budgetReservationPerformed: false,
+    paperFillAuthorized: false,
+    realMoneyExecutionAuthorized: false,
+    ledgerMutationPerformed: false,
+  };
+}
