@@ -89,9 +89,16 @@ export function scoreSignal({ statement, series, source, nowMs, horizons = HORIZ
         || typeof c.close !== 'number' || !Number.isFinite(c.close) || c.close <= 0) {
       return unavailable('INVALID_HISTORY', 'history must contain strictly increasing timestamps and finite positive prices');
     }
+    if (Object.hasOwn(c, 'availableAtMs')
+        && (!validClock(c.availableAtMs) || c.availableAtMs < c.tMs)) {
+      return unavailable('INVALID_AVAILABILITY', 'publication availability must be Date-safe and not precede event time');
+    }
     previous = c.tMs;
   }
-  const closes = series.filter((c) => c.tMs <= nowMs);
+  // Event time and publication availability are different clocks. Honor the
+  // latter when supplied; never infer a verified vintage from its absence.
+  const closes = series.filter((c) => c.tMs <= nowMs
+    && (!Object.hasOwn(c, 'availableAtMs') || c.availableAtMs <= nowMs));
   const baseline = closes.find((c) => c.tMs >= t0 && c.tMs < t0 + DAY_MS) ?? null;
   for (const h of horizons) {
     const dueMs = t0 + h * DAY_MS;
