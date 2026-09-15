@@ -67,8 +67,43 @@ export function scoreSignal({ statement, series, source, nowMs, horizons = HORIZ
     for (const h of horizons) out[`h${h}d`] = { label: 'UNAVAILABLE', note: 'signal time unparseable — cannot score honestly' };
     return { t0: null, outcomes: out };
   }
-  const closes = Array.isArray(series) ? series : [];
-  const baseline = closes.find((c) => c.tMs >= t0) ?? null;
+  // A provider can return history beyond the requested scoring clock. Such
+  // rows must never make an unelapsed outcome look realized. This event-time
+  // filter is not proof of point-in-time publication vintages.
+  const validTime = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 8.64e15;
+  let historyError = !validTime(nowMs) ? 'invalid as-of clock' : null;
+  const closes = [];
+  const seen = new Set();
+  for (const point of Array.isArray(series) ? series : []) {
+    if (!point || !validTime(point.tMs)) {
+      historyError = 'invalid observation timestamp';
+      break;
+    }
+    if (point.tMs > nowMs) continue;
+    if (Object.hasOwn(point, 'availableAtMs')) {
+      if (!validTime(point.availableAtMs) || point.availableAtMs < point.tMs) {
+        historyError = 'invalid observation availability timestamp';
+        break;
+      }
+      if (point.availableAtMs > nowMs) continue;
+    }
+    if (typeof point.close !== 'number' || !Number.isFinite(point.close) || point.close <= 0) {
+      historyError = 'invalid historical close';
+      break;
+    }
+    if (seen.has(point.tMs)) {
+      historyError = 'duplicate historical timestamp';
+      break;
+    }
+    seen.add(point.tMs);
+    closes.push(point);
+  }
+  if (historyError) {
+    for (const h of horizons) out[`h${h}d`] = { label: 'UNAVAILABLE', note: historyError };
+    return { t0, outcomes: out };
+  }
+  closes.sort((a, b) => a.tMs - b.tMs);
+  const baseline = closes.find((c) => c.tMs >= t0 && c.tMs < t0 + DAY_MS) ?? null;
   for (const h of horizons) {
     const dueMs = t0 + h * DAY_MS;
     if (!baseline) {
@@ -81,8 +116,8 @@ export function scoreSignal({ statement, series, source, nowMs, horizons = HORIZ
       }
       continue;
     }
-    const outcome = closes.find((c) => c.tMs >= dueMs) ?? null;
-    if (outcome) {
+    const outcome = closes.find((c) => c.tMs >= dueMs && c.tMs < dueMs + DAY_MS) ?? null;
+    if (outcome && Number.isFinite(outcome.close / baseline.close - 1)) {
       out[`h${h}d`] = {
         label: 'MEASURED',
         forwardReturn: outcome.close / baseline.close - 1,
@@ -128,7 +163,7 @@ export function buildTrackRecord({ verified, excluded, histories, nowMs, horizon
       verdict: d.verdict ?? 'unknown',
       proposedAction: d.proposedAction ?? null,
       conviction: d.conviction ?? null,
-      snapshotPriceUsd: d.snapshot?.priceUsd ?? null, // REPORTED context only — NOT used in return math
+      snapshotPriceUsd: d.snapshot?.priceUsd ?? null,
       scored: scoreable,
     };
     if (d.verdict === 'BLOCKED') {
@@ -182,7 +217,7 @@ export function buildTrackRecord({ verified, excluded, histories, nowMs, horizon
     inputs: {
       signalReceipts: verified.length + excluded.length,
       verified: verified.length,
-      excluded, // full list with reasons — unverifiable receipts are named, not hidden
+      excluded,
     },
     population: {
       total: rows.length,
