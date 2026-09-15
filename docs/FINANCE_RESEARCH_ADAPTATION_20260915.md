@@ -1,29 +1,31 @@
 # Finance research adaptation — 2026-09-15
 
-Scope: software research and the existing paper engine. No real-money execution, capital transfer, new signed book, model-quality certification, or profitability claim.
+Scope: original software research and the existing paper engine. No funded order, capital transfer, new signed book, model-quality certificate or profitability claim.
 
-## Implemented repair
+## Concurrent-source reconciliation
 
-At source `0a18eea4c0ced5543e0536bf84b3cb47b88ecc0f`, `scoreSignal` selected an outcome from the supplied series before enforcing the scoring clock. A synthetic fixture with a January 1 baseline, a January 8 endpoint and a January 2 as-of clock returned a seven-day `MEASURED` return. This is a reproducible source defect, not evidence that a historical published result was affected.
+The initial PR24 implementation reproduced future-outcome leakage at old main `0a18eea4c0ced5543e0536bf84b3cb47b88ecc0f` and passed its own native source tests. While review completed, PR23 admitted a broader temporal repair at `ac0af68521a3ba09e701b519bddc77fbe70769a8`. A normal merge of PR24 was rejected with a conflict; no source was overwritten or bypassed.
 
-The repair filters future event-time rows, honors explicit `availableAtMs` when supplied, rejects invalid visible numbers and duplicate timestamps, sorts a copied view without modifying inputs, and requires the baseline and horizon endpoints to fall within their respective daily sampling windows. Missing daily observations remain unavailable rather than being substituted by a later observation. Pending outcomes remain in the full population, not disguised as wins or silently discarded.
+This successor preserves the complete admitted PR23 tree, its strict history ordering and bounds, horizon validation, reason codes, temporal diagnostics, researchQualification HOLD, all 139 existing tests, paper qualification document and existing complete CI. It adds only explicit publication-availability enforcement, eight focused regressions, a pinned runner hardener and this prior-art/integration note. It does not restore the initial PR24 sorting behavior or replace the now-admitted scorer.
 
-This is an event-time/availability boundary. It does NOT prove that legacy datasets contain point-in-time publication vintages, eliminate every possible training leak, or qualify an investment strategy. Existing signed history is not rewritten. All 114 previously discovered test cases remain in the package suite; 21 new cases are added. One existing environment-dependent signing-handoff test can remain explicitly skipped when its required environment is absent; that skip is not a pass.
+When an observation supplies `availableAtMs`, that timestamp must be valid and no earlier than its event timestamp. An event completed before the evaluation clock cannot become a measured result while its stated publication availability is still in the future. Missing availability preserves legacy event-time semantics; it never manufactures verified point-in-time vintages. Invalid histories are not silently repaired. Original receipts and the canonical book remain unchanged.
 
-## Primary systems studied; original SZL adaptation
+The initial 135-case PR24 run is historical evidence for its original source only. The reconciled suite has 147 discovered cases, including the 139 admitted predecessor cases and eight availability cases. The existing environment-dependent signing-handoff skip remains a skip, not a pass. Inspect exact-head and subsequent main native evidence; do not transfer the old run's PASS to new source.
 
-These are engineering reference systems, not a ranking of demonstrated profitability. No implementation from the following projects is copied into this repair.
+## Primary systems studied and SZL adaptation
 
-| Primary reference | Useful design pattern | SZL integration target and qualification requirement |
+These are engineering references, not a ranking of demonstrated profitability. No third-party implementation is copied into this repair.
+
+| Reference | Pattern worth studying | Existing SZL destination |
 |---|---|---|
-| QuantConnect LEAN risk management and reality modeling | Separate signal/portfolio/risk concerns; explicit fill, fee, slippage, buying-power and settlement models | Keep `szl-quant` accounting and policy gates separate from A11oy model proposals. Evaluate fees, slippage, inference/data costs and an equally budgeted baseline; simplified paper fills are not executable quotes. |
-| NautilusTrader execution reconciliation | Persistent events, explicit incomplete histories and unknown outcomes, reconciliation instead of assuming missing means flat | Retain signed book identity and receipts; an unavailable or incomplete observation must not imply zero holdings or successful execution. No live venue adapter is introduced here. |
-| Microsoft Qlib / RD-Agent | Reproducible datasets, research workflows, model experiments and point-in-time data handling | Bind model/dataset/code revisions, preregister evaluation windows, retain the full attempted experiment population, and prevent tuning on the held-out window. This remains a proposed extension, not a trained financial model. |
-| Freqtrade lookahead analysis | Compare results under constrained future information to reveal hindsight dependence | The new regression suite directly tests future-row exclusion and future-price perturbation invariance in the existing SZL scorer. |
-| TauricResearch TradingAgents | Separate analyst roles and adversarial debate | Proposed A11oy research roles produce structured evidence-backed hypotheses; Hatun and deterministic controls remain separate. Multiple agents agreeing is not independent evidence or authorization. |
-| Alpaca paper-trading documentation | Distinguish simulation from live fills and account behavior | Paper-only evaluation remains separate from funded capital. No broker connection or real-money order is created by this change. |
+| QuantConnect LEAN | Separate signal, portfolio and risk concerns; explicit fill, fee, slippage, buying-power and settlement models | Keep A11oy proposals separate from deterministic szl-quant accounting and Hatun review. Cost scenarios and equally budgeted baselines are research requirements, not execution guarantees. |
+| NautilusTrader | Persist events and reconcile external state; distinguish missing/incomplete evidence from flat or confirmed state | Keep signed-book identity and receipts; never infer zero holdings or success from an unavailable observation. No live venue adapter is added here. |
+| Microsoft Qlib and RD-Agent | Reproducible datasets, point-in-time handling, model experiments and research pipelines | Bind dataset/model/code/prompt revisions, retain attempted experiments and keep held-out windows outside tuning. This remains proposed integration, not a trained financial model. |
+| Freqtrade lookahead analysis | Expose future-data dependencies by restricting what each evaluation can observe | The SZL temporal and publication-availability regressions test the analogous boundary in the existing scorer. |
+| TauricResearch TradingAgents | Separate analyst roles and adversarial debate | Existing A11oy agents can produce structured theses and counter-theses; agreement among agents is not independent evidence or financial authorization. |
+| Alpaca paper-trading documentation | Preserve the distinction between simulation and actual market fills | Qualify paper behavior separately; do not infer liquidity, queue priority, latency or profitable live execution from a simulation. |
 
-References consulted on 2026-09-15:
+Primary references consulted on 2026-09-15:
 - https://www.quantconnect.com/docs/v2/writing-algorithms/algorithm-framework/risk-management/key-concepts
 - https://www.quantconnect.com/docs/v2/writing-algorithms/reality-modeling/key-concepts
 - https://nautilustrader.io/docs/latest/concepts/execution/reconciliation/
@@ -32,24 +34,18 @@ References consulted on 2026-09-15:
 - https://www.freqtrade.io/en/stable/lookahead-analysis/
 - https://docs.alpaca.markets/us/docs/paper-trading
 
-Inspect the license, exact revision, notices, data rights and dependency closure before adopting any third-party implementation. Studying a pattern does not transfer branding rights or license an entire ecosystem. Vela charting is separately pinned and attributed in the admitted PURIQ application; that does not license PineTS under the same terms.
+Inspect licenses, exact versions, notices and data rights before integrating any implementation. Studying a pattern does not transfer branding rights or license an entire ecosystem. Vela's attributed chart component in PURIQ does not license PineTS under the same terms.
 
-## Reconcile the existing finance work; do not replace it
+## One finance release, not competing products
 
-PURIQ research source was admitted in `szl-holdings/puriq-live` PR16 at `91717976275b685bef5f6ba9caa40b43fc1efff5`. Main run `34926967026` completed successfully. Its `$1,000` display is a stateless virtual baseline, not the canonical book.
+PURIQ research source was admitted through PR16 at `91717976275b685bef5f6ba9caa40b43fc1efff5`; main run34926967026 passed. Its $1,000 display is a stateless virtual baseline, not the existing $10,000 canonical book.
 
-Concurrent `szl-holdings/a11oy` PR2176 implements the finance source adapters and the existing `SZLHOLDINGS/finance` public projection. Preserve that work. The canonical source/publication owner remains A11oy; do not create a competing finance Space or silently replace the multi-source backend with the standalone research application's smaller source set.
+Preserve concurrent A11oy PR2176's 16-source finance backend and existing `SZLHOLDINGS/finance` projection. Do not replace it with the standalone research application's smaller source set, add an independent writer or create another Space. The joint release needs both canonical A11oy identity and the admitted PURIQ component identity, actual mounted research routes, same-origin chart bytes and attribution, anonymous public probes, exact-HF readback and the native publisher receipt.
 
-The joint release must bind both the canonical A11oy source and any admitted PURIQ research component revision, verify its actual mounted research routes and source-owned chart bytes, keep the public projection anonymous and read-only, and retain the native publication receipt. Do not claim this joint release is complete from either component's tests alone.
+The shared public-smoke repair `.github#743` still requires ordinary protected merge-queue admission before its consumer pins can be adopted. No current component test completes that dependency or the final deployment.
 
-The shared public-smoke controller repair `.github#743` is not admitted merely because its feature tests pass. Its normal protected merge-queue admission and the canonical consumer-pin update remain distinct requirements. Do not bypass the queue or send Hub management credentials to public application probes.
+## Research-agent contract
 
-## Research-agent contract to build on the existing software
+PURIQ adapters produce typed, timestamped observations with source identities, units, completeness and provenance. Existing A11oy research agents may propose hypotheses and falsification tests; source text is untrusted data and cannot grant tool permissions. Deterministic gates and Hatun review remain separate from models. The canonical szl-quant book evaluates paper scenarios with visible costs, held-out windows and all attempted/rejected candidates. Receipts distinguish observations, modeled results, unavailable evidence and verified deployment.
 
-1. PURIQ adapters produce typed observations: provider, instrument/event identity, units, source/event/publication/retrieval times, raw/normalized digests, completeness and access rights.
-2. Existing A11oy research agents may propose a thesis, counter-thesis and falsification test with those observation references. Keep news and repository content untrusted; text cannot alter tool permissions or expose secrets.
-3. Deterministic gates reject stale/missing evidence, invalid identities, excessive costs and unsupported actions. Hatun review is not an autonomous financial authorization.
-4. `szl-quant` evaluates reproducible paper scenarios and the existing signed book; training/validation/held-out windows, selected parameters, rejected candidates and all costs remain visible. No zero-loss claim is inferred from zero exposure.
-5. Receipts and the public proof surface distinguish observed data, modeled results, unavailable inputs and deployment evidence. Models listed on Hugging Face are not presumed financially qualified.
-
-Still required before any claim of useful predictive behavior: verified point-in-time datasets and rights, immutable model/prompt/config revisions, selection-bias controls, held-out and forward paper evaluation, cost sensitivity, benchmark-relative results, calibration and sufficient observations. No number of successful software tests alone closes these requirements. No transition from this research contract to unattended real-money authority is implemented.
+Still unproven: historical publication vintages and data rights, financial model skill, out-of-sample and forward performance, actual cost calibration, sufficient observations and benchmark-relative results. Zero exposure is not evidence of a safe or profitable strategy. No transition to unattended real-money authority is implemented.
