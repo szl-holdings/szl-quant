@@ -30,7 +30,7 @@ export const WEAK_EVIDENCE_N = 10;
  *  (decision clock), falling back to the snapshot observation time. */
 export function signalTimeMs(statement) {
   const name = statement?.subject?.[0]?.name ?? '';
-  const iso = name.split('/').pop();
+  const iso = typeof name === 'string' ? name.split('/').pop() : '';
   const t = Date.parse(iso);
   if (Number.isFinite(t)) return t;
   const snap = statement?.predicate?.decision?.snapshot?.observedAtIso;
@@ -61,39 +61,74 @@ export function verifySignalEnvelopes(entries, publicKey, { verifyEnvelope }) {
  * outcome). Pure. Returns per-horizon outcomes keyed `h${days}d`.
  */
 export function scoreSignal({ statement, series, source, nowMs, horizons = HORIZONS_DAYS }) {
+  if (!Array.isArray(horizons) || horizons.length === 0 || horizons.length > 32
+      || new Set(horizons).size !== horizons.length
+      || !horizons.every((h) => Number.isSafeInteger(h) && h > 0 && h <= 3650)) {
+    throw new TypeError('horizons must be unique positive integer days, bounded to 3650');
+  }
   const t0 = signalTimeMs(statement);
   const out = {};
-  if (t0 === null) {
-    for (const h of horizons) out[`h${h}d`] = { label: 'UNAVAILABLE', note: 'signal time unparseable — cannot score honestly' };
-    return { t0: null, outcomes: out };
+  const unavailable = (code, note) => {
+    for (const h of horizons) out[`h${h}d`] = { label: 'UNAVAILABLE', code, note };
+    return { t0, outcomes: out };
+  };
+  // Explicit evaluation clock: a later row in a supplied history cannot make
+  // an unelapsed outcome measurable. Milliseconds must remain Date-safe.
+  const validClock = (t) => Number.isSafeInteger(t) && t >= 0 && t <= 8.63e15;
+  if (!validClock(nowMs)) return unavailable('INVALID_AS_OF', 'evaluation clock invalid — cannot score honestly');
+  if (!validClock(t0)) return unavailable('INVALID_SIGNAL_TIME', 'signal time unparseable — cannot score honestly');
+  if (t0 > nowMs) return unavailable('FUTURE_SIGNAL', 'signal is later than the evaluation clock — not yet observable');
+  if (!Array.isArray(series) || series.length > 100_000) {
+    return unavailable('INVALID_HISTORY', 'history must be a bounded array of daily closes');
   }
-  const closes = Array.isArray(series) ? series : [];
-  const baseline = closes.find((c) => c.tMs >= t0) ?? null;
+  // Do not silently sort, coerce, deduplicate, interpolate or repair prices.
+  // An invalid series is not an empty, zero-return or winning observation.
+  let previous = -1;
+  for (const c of series) {
+    if (!c || !validClock(c.tMs) || c.tMs <= previous
+        || typeof c.close !== 'number' || !Number.isFinite(c.close) || c.close <= 0) {
+      return unavailable('INVALID_HISTORY', 'history must contain strictly increasing timestamps and finite positive prices');
+    }
+    previous = c.tMs;
+  }
+  const closes = series.filter((c) => c.tMs <= nowMs);
+  const baseline = closes.find((c) => c.tMs >= t0 && c.tMs < t0 + DAY_MS) ?? null;
   for (const h of horizons) {
     const dueMs = t0 + h * DAY_MS;
     if (!baseline) {
-      // No close at/after signal time: either the series ended (gap) or the
-      // first post-signal close has not printed yet (pending).
-      if (nowMs < t0 + DAY_MS) {
-        out[`h${h}d`] = { label: 'UNAVAILABLE', note: `pending — first measurable close ~${new Date(t0 + DAY_MS).toISOString().slice(0, 10)}`, pendingUntilIso: new Date(dueMs + DAY_MS).toISOString() };
-      } else {
-        out[`h${h}d`] = { label: 'UNAVAILABLE', note: 'history gap: no close at/after signal time although it has elapsed' };
-      }
+      out[`h${h}d`] = nowMs < t0 + DAY_MS
+        ? { label: 'UNAVAILABLE', code: 'BASELINE_PENDING', note: 'pending — first completed daily baseline not yet observed', pendingUntilIso: new Date(t0 + DAY_MS).toISOString() }
+        : { label: 'UNAVAILABLE', code: 'BASELINE_GAP', note: 'history gap: no daily baseline within one day after the signal' };
       continue;
     }
-    const outcome = closes.find((c) => c.tMs >= dueMs) ?? null;
+    if (nowMs < dueMs) {
+      out[`h${h}d`] = { label: 'UNAVAILABLE', code: 'HORIZON_PENDING', note: 'pending — requested horizon has not elapsed at the evaluation clock', pendingUntilIso: new Date(dueMs).toISOString() };
+      continue;
+    }
+    // Decision-clock horizons retain the existing contract, with bounded
+    // daily alignment. Never reuse a late baseline as its own outcome.
+    const outcome = closes.find((c) => c.tMs >= dueMs && c.tMs < dueMs + DAY_MS && c.tMs > baseline.tMs) ?? null;
     if (outcome) {
+      const forwardReturn = outcome.close / baseline.close - 1;
+      if (!Number.isFinite(forwardReturn)) {
+        out[`h${h}d`] = { label: 'UNAVAILABLE', code: 'NONFINITE_RETURN', note: 'price ratio exceeds finite numeric range — result withheld' };
+        continue;
+      }
       out[`h${h}d`] = {
-        label: 'MEASURED',
-        forwardReturn: outcome.close / baseline.close - 1,
+        label: 'MEASURED', forwardReturn,
         baselineIso: new Date(baseline.tMs).toISOString(),
         outcomeIso: new Date(outcome.tMs).toISOString(),
+        evaluatedAsOfIso: new Date(nowMs).toISOString(),
+        horizonAnchor: 'decision-clock',
+        baselineLagMs: baseline.tMs - t0,
+        outcomeLagMs: outcome.tMs - dueMs,
+        realizedIntervalMs: outcome.tMs - baseline.tMs,
         source: source ?? 'unknown',
       };
     } else if (nowMs < dueMs + DAY_MS) {
-      out[`h${h}d`] = { label: 'UNAVAILABLE', note: `pending — horizon elapses ~${new Date(dueMs).toISOString().slice(0, 10)}`, pendingUntilIso: new Date(dueMs + DAY_MS).toISOString() };
+      out[`h${h}d`] = { label: 'UNAVAILABLE', code: 'OUTCOME_PENDING', note: 'pending — completed daily outcome not yet observed', pendingUntilIso: new Date(dueMs + DAY_MS).toISOString() };
     } else {
-      out[`h${h}d`] = { label: 'UNAVAILABLE', note: 'history gap: horizon elapsed but no close available in series' };
+      out[`h${h}d`] = { label: 'UNAVAILABLE', code: 'OUTCOME_GAP', note: 'history gap: no daily outcome in the requested horizon window' };
     }
   }
   return { t0, outcomes: out };
@@ -195,6 +230,23 @@ export function buildTrackRecord({ verified, excluded, histories, nowMs, horizon
       note: 'FULL population — every verified signal is a row; BLOCKED no-calls counted, never scored, never hidden',
     },
     aggregates,
+    researchQualification: {
+      schema: 'szl.quant.track-qualification/v1',
+      state: 'HOLD',
+      temporalContract: 'decision-clock-asof/v2',
+      evidenceState: rows.length === 0 ? 'NO_VERIFIED_SIGNALS'
+        : scoredRows === 0 ? 'NO_ENTRY_SIGNALS'
+          : Object.values(aggregates).every((a) => a.nRealized === 0)
+            ? 'NO_REALIZED_OUTCOMES' : 'DESCRIPTIVE_OUTCOMES_ONLY',
+      horizonCounts: Object.fromEntries(Object.entries(aggregates).map(([h, a]) =>
+        [h, { realized: a.nRealized, pending: a.nPending, gaps: a.nGaps }])),
+      pointInTimeVintagesVerified: false,
+      executionCostCalibrationVerified: false,
+      outOfSampleSkillEstablished: false,
+      capitalAdmission: false,
+      liveExecution: false,
+      note: 'Signatures and descriptive outcomes do not establish net trading skill. Missing or empty outcome evidence cannot authorize capital. Horizon samples may overlap and are not independent trials.',
+    },
     signals: rows,
     honesty: 'MEASURED values describe realized past forward returns of ADVISORY paper signals (baseline and outcome from ONE source series). They predict nothing. Not financial advice.',
   };
