@@ -1,7 +1,7 @@
-# CI for szl-quant — unit tests + receipt verification.
-# All actions pinned to full-length commit SHAs (org convention).
+# CI for szl-quant — complete unit suite + independent receipt verification.
+# Source qualification only. No signing credentials, ledger write, or deployment.
 name: ci
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -12,17 +12,59 @@ permissions:
 jobs:
   test-and-verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
+      - name: Harden source-only runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c
+        with:
+          egress-policy: audit
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
-      - name: Unit tests (doctrine invariants, DSSE, gates, determinism)
-        run: node --test test/engine.test.mjs
-      - name: Verify committed receipts against pinned engine pubkey
+      - name: Record exact source and interpreter
+        shell: bash
         run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p qualification-evidence
+          git archive --format=tar HEAD | gzip -n > qualification-evidence/source.tar.gz
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import crypto from 'node:crypto';
+          fs.writeFileSync('qualification-evidence/source.json', JSON.stringify({
+            schema:'szl.quant.source-test/v1',source_revision:process.env.SOURCE_REVISION,
+            workflow_event_revision:process.env.GITHUB_SHA,run_id:process.env.GITHUB_RUN_ID,
+            run_attempt:process.env.GITHUB_RUN_ATTEMPT,node:process.version,
+            source_archive_sha256:crypto.createHash('sha256').update(fs.readFileSync('qualification-evidence/source.tar.gz')).digest('hex'),
+            ledger_mutated:false,trading_enabled:false,deployment_verified:false
+          },null,2)+'\n');
+          JS
+      - name: Unit tests (doctrine invariants, DSSE, gates, determinism)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test 2>&1 | tee qualification-evidence/unit-tests.log
+          node --test --test-reporter=junit test/track-asof.test.mjs > qualification-evidence/asof-tests.xml
+      - name: Verify committed receipts against pinned engine pubkey
+        shell: bash
+        run: |
+          set -euo pipefail
           if ls receipts/*.json >/dev/null 2>&1; then
-            node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/
+            node verify/verify.mjs --pubkey keys/engine_pubkey.json --dir receipts/ 2>&1 | tee qualification-evidence/receipt-verification.log
           else
-            echo "no receipts committed yet — nothing to verify (honest empty)"
+            echo "no receipts committed yet — nothing to verify (honest empty)" | tee qualification-evidence/receipt-verification.log
           fi
+      - name: Retain actual source qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: quant-source-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qualification-evidence/
+          if-no-files-found: error
+          retention-days: 30
