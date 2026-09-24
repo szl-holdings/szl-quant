@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeBook, paperFill } from '../src/portfolio.mjs';
+import { buildBookBody } from '../src/book.mjs';
 
 test('paper cost model rejects negative or non-finite modeled costs', () => {
   for (const costModel of [
@@ -55,6 +56,38 @@ test('book snapshots admitted costs and every fill revalidates inherited state',
       price: 10,
       atIso: '2026-09-24T00:01:00.000Z',
       reason: 'invalid inherited config',
+    }),
+    /finite and nonnegative/,
+  );
+});
+
+test('stateful book refuses an invalid inherited cost model even when no fill occurs', () => {
+  const predecessor = buildBookBody({
+    prevBook: null,
+    decisions: [],
+    runDir: '20260924T000000Z_run1',
+    nowIso: '2026-09-24T00:00:00.000Z',
+    allRunDirs: ['20260924T000000Z_run1'],
+    config: {
+      startingCashUsd: 1000,
+      entryFractionBps: 1000,
+      costModel: { feeBps: 30, slippageBps: 20 },
+    },
+  });
+
+  predecessor.config.costModel.feeBps = -1;
+  assert.throws(
+    () => buildBookBody({
+      prevBook: {
+        runDir: '20260924T000000Z_run1',
+        file: 'book_1.receipt.json',
+        sha256: 'a'.repeat(64),
+        body: predecessor,
+      },
+      decisions: [],
+      runDir: '20260924T010000Z_run2',
+      nowIso: '2026-09-24T01:00:00.000Z',
+      allRunDirs: ['20260924T000000Z_run1', '20260924T010000Z_run2'],
     }),
     /finite and nonnegative/,
   );
