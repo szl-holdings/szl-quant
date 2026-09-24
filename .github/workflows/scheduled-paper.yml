@@ -160,7 +160,7 @@ jobs:
                 const bodies = rfs.map(p => JSON.parse(Buffer.from(JSON.parse(fs.readFileSync(p,"utf8")).payload,"base64").toString()).predicate.summary);
                 bodies.sort((a,b) => a.runDir < b.runDir ? -1 : 1);
                 const h = bodies[bodies.length-1];
-                const fmt = (arr) => [...arr].sort((a,b)=>b.count-a.count).map(x=>x.gate+"×"+x.count).join(" ");
+                const fmt = (arr) => [...arr].sort((a,b)=>b.count-a.count).map(x=>x.gate+"\u00d7"+x.count).join(" ");
                 let lb=0, ld=0; const lg={};
                 for (const b of bodies){ lb+=b.totals.blocked; ld+=b.totals.decisions; for(const x of b.totals.refusalsByGate) lg[x.gate]=(lg[x.gate]??0)+x.count; }
                 const lifeArr = Object.entries(lg).map(([gate,count])=>({gate,count}));
