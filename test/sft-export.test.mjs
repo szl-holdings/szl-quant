@@ -18,6 +18,24 @@ import { TRUST_CEILING } from '../src/canon.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 
+test('sft-export: dataset card selects only training rows, not JSON sidecars', () => {
+  const card = readFileSync(join(ROOT, 'sft/DATASET_CARD.md'), 'utf8').replace(/\r\n/g, '\n');
+  const frontmatter = card.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  assert.ok(frontmatter, 'dataset card must have YAML frontmatter');
+  const configs = frontmatter[1].match(/^configs:\n((?:[ \t]+[^\n]*(?:\n|$))+)/m);
+  assert.ok(configs, 'explicit configs must prevent JSON receipt/manifest sidecars from being inferred as data');
+  // Keep this small, dependency-free repository's exact public selection contract
+  // explicit: one configuration, one split, and one non-glob JSONL path.
+  assert.deepEqual(configs[1].trimEnd().split('\n'), [
+    '  - config_name: default',
+    '    data_files:',
+    '      - split: train',
+    '        path: quant_sft_v1.jsonl',
+  ]);
+  assert.equal((frontmatter[1].match(/^configs:/gm) ?? []).length, 1, 'duplicate configs keys are ambiguous');
+  assert.ok(existsSync(join(ROOT, 'sft/quant_sft_v1.jsonl')), 'selected training file must exist');
+});
+
 function enginePub() {
   const pub = JSON.parse(readFileSync(join(ROOT, 'keys/engine_pubkey.json'), 'utf8'));
   return loadPublicKeyFromSpkiBase64(pub.publicKeySpkiBase64);

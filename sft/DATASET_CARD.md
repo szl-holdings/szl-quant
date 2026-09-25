@@ -14,6 +14,11 @@ tags:
 pretty_name: SZL Quant SFT v1 — receipt-derived trading-reasoning rows
 size_categories:
   - 1K<n<10K
+configs:
+  - config_name: default
+    data_files:
+      - split: train
+        path: quant_sft_v1.jsonl
 ---
 
 # szl-quant-sft-v1 — training rows with signed lineage
