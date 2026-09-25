@@ -25,19 +25,39 @@ export function microToUsdString(m) {
 }
 
 /**
+ * Validate the MODELED paper cost contract.
+ *
+ * Fees and slippage cannot be negative because that would manufacture a
+ * rebate/price improvement that the declared model never measured. Their
+ * combined rate must remain below 100% so SELL effective prices stay
+ * strictly positive. This is a mathematical admission boundary, not a claim
+ * that any particular nonnegative bps assumption is realistic.
+ */
+export function validateCostModel(costModel) {
+  if (!costModel ||
+      !Number.isFinite(costModel.feeBps) || costModel.feeBps < 0 ||
+      !Number.isFinite(costModel.slippageBps) || costModel.slippageBps < 0) {
+    throw new Error('costModel feeBps/slippageBps must be finite and nonnegative (MODELED; fail closed)');
+  }
+  const totalBps = costModel.feeBps + costModel.slippageBps;
+  if (!Number.isFinite(totalBps) || totalBps >= 10_000) {
+    throw new Error('combined MODELED cost must be below 10000 bps (fail closed)');
+  }
+  return { feeBps: costModel.feeBps, slippageBps: costModel.slippageBps };
+}
+
+/**
  * Create a paper book.
  * costModel: { feeBps, slippageBps } — MODELED, stated in every receipt.
  */
 export function makeBook({ startingCashUsd, costModel }) {
   if (!(startingCashUsd > 0)) throw new Error('startingCashUsd must be > 0');
-  if (!costModel || !Number.isFinite(costModel.feeBps) || !Number.isFinite(costModel.slippageBps)) {
-    throw new Error('explicit costModel {feeBps, slippageBps} required (MODELED)');
-  }
+  const admittedCostModel = validateCostModel(costModel);
   return {
     cashMicro: toMicroUsd(startingCashUsd),
     positions: {},          // asset → { qtyE9: bigint (1e-9 units), costMicro: bigint }
     fills: [],
-    costModel,
+    costModel: admittedCostModel,
   };
 }
 
@@ -52,7 +72,8 @@ export const QTY = 1_000_000_000n; // 1e-9 asset units
  */
 export function paperFill(book, { asset, side, notionalUsd, qtyE9: sellQtyE9, price, atIso, reason }) {
   if (!(price > 0)) throw new Error('fill requires observed price > 0');
-  const costRate = (book.costModel.feeBps + book.costModel.slippageBps) / 10_000;
+  const admittedCostModel = validateCostModel(book?.costModel);
+  const costRate = (admittedCostModel.feeBps + admittedCostModel.slippageBps) / 10_000;
   const pos = book.positions[asset] ?? { qtyE9: 0n, costMicro: 0n };
   let fill;
 
@@ -74,7 +95,7 @@ export function paperFill(book, { asset, side, notionalUsd, qtyE9: sellQtyE9, pr
       effectivePrice: effPrice.toFixed(10),
       qtyE9: qtyE9.toString(),
       modeledCostUsd: microToUsdString(modeledCostMicro),
-      costModel: { ...book.costModel, label: 'MODELED' },
+      costModel: { ...admittedCostModel, label: 'MODELED' },
       atIso, reason,
     };
   } else if (side === 'SELL') {
@@ -94,7 +115,7 @@ export function paperFill(book, { asset, side, notionalUsd, qtyE9: sellQtyE9, pr
       effectivePrice: effPrice.toFixed(10),
       qtyE9: q.toString(),
       modeledCostUsd: microToUsdString(grossMicro - proceedsMicro),
-      costModel: { ...book.costModel, label: 'MODELED' },
+      costModel: { ...admittedCostModel, label: 'MODELED' },
       atIso, reason,
     };
   } else {

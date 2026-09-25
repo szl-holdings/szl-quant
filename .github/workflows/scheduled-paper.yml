@@ -27,8 +27,19 @@ jobs:
   paper-session:
     if: github.repository == 'szl-holdings/szl-quant'
     runs-on: ubuntu-latest
+    env:
+      SOURCE_REVISION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+          persist-credentials: false
+      - name: Prove exact scheduled source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          printf '%s\n' "$SOURCE_REVISION" > "$RUNNER_TEMP/source-revision.txt"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'

@@ -23,7 +23,7 @@
  */
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { makeBook, paperFill, markToMarket, toMicroUsd, microToUsdString, QTY } from './portfolio.mjs';
+import { makeBook, paperFill, markToMarket, toMicroUsd, microToUsdString, QTY, validateCostModel } from './portfolio.mjs';
 
 export const BOOK_FILE_RE = /^book_\d+\.receipt\.json$/;
 export const DEFAULT_BOOK_CONFIG = Object.freeze({
@@ -113,13 +113,17 @@ export function buildBookBody({ prevBook, decisions, runDir, nowIso, allRunDirs,
   const seq = prevBook ? prevBook.body.seq + 1 : 1;
   const engineDefaults = { ...config, costModel: { ...config.costModel } };
   const effConfig = prevBook ? prevBook.body.config : engineDefaults;
+  // A signed predecessor is evidence, not permission to perpetuate malformed
+  // accounting assumptions. Validate inherited configuration before any
+  // state transition or no-op successor receipt can be emitted.
+  const admittedCostModel = validateCostModel(effConfig?.costModel);
   const configNote = prevBook && JSON.stringify(prevBook.body.config) !== JSON.stringify(engineDefaults)
     ? 'config INHERITED from the existing book chain; engine defaults differ — changing config requires an explicit new book, never a silent drift'
     : undefined;
 
   const book = prevBook
-    ? { ...resurrectState(prevBook.body), fills: [], costModel: { ...effConfig.costModel } }
-    : makeBook({ startingCashUsd: effConfig.startingCashUsd, costModel: { ...effConfig.costModel } });
+    ? { ...resurrectState(prevBook.body), fills: [], costModel: { ...admittedCostModel } }
+    : makeBook({ startingCashUsd: effConfig.startingCashUsd, costModel: { ...admittedCostModel } });
 
   const sorted = [...decisions].sort((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0));
   const prices = {};
@@ -162,7 +166,7 @@ export function buildBookBody({ prevBook, decisions, runDir, nowIso, allRunDirs,
     generatedAtIso: nowIso,
     runDir,
     prev: prevBook ? { runDir: prevBook.runDir, file: prevBook.file, sha256: prevBook.sha256 } : null,
-    config: effConfig,
+    config: { ...effConfig, costModel: { ...admittedCostModel } },
     ...(configNote ? { configNote } : {}),
     ...(prevBook
       ? { skippedRunDirs: before.filter((d) => d > prevBook.runDir) }
