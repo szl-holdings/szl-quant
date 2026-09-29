@@ -11,7 +11,8 @@ tags:
   - dsse
   - receipts
   - sft
-pretty_name: SZL Quant SFT v1 — receipt-derived trading-reasoning rows
+  - training-held
+pretty_name: SZL Quant SFT v1 — receipt-derived trading-reasoning rows (training HELD)
 size_categories:
   - 1K<n<10K
 configs:
@@ -23,7 +24,29 @@ configs:
 
 # szl-quant-sft-v1 — training rows with signed lineage
 
+> **Training eligibility: HELD-COUNSEL. Do not train on this dataset.**
+> The estate's license register
+> ([`SZLHOLDINGS/model-bom` `DATASET_LICENSE_REGISTER.csv`](https://huggingface.co/datasets/SZLHOLDINGS/model-bom/blob/main/DATASET_LICENSE_REGISTER.csv))
+> lists this dataset as **HELD pending counsel review of upstream CoinGecko
+> redistribution and commercial terms**, and it appears on the CI-enforced
+> [`TRAINING_BLOCKLIST.txt`](https://huggingface.co/datasets/SZLHOLDINGS/model-bom/blob/main/TRAINING_BLOCKLIST.txt).
+> The rows are published for lineage inspection and replay verification only.
+> The Apache-2.0 declaration covers this repository's own materials (generator
+> output, manifests, receipts); it does not license the upstream price feed.
+
 **Every row in this dataset is derived deterministically from a DSSE-signed backtest receipt and is recomputable bit-exact from content-addressed archives.** No row was hand-written, scraped, or synthesized by a model.
+
+## Evidence boundary (from `status.json`, observed 2026-09-25)
+
+| Subject | Evidence state |
+|---|---|
+| Repository card declares Apache-2.0; standalone LICENSE published | **OBSERVED** |
+| Copyright ownership of upstream price data · relicensing authority | **UNKNOWN** |
+| Artifact lineage · consent · privacy review · training suitability · deployment | **BLOCKED** |
+| Production-ready | **false** |
+| Training eligibility (estate register) | **HELD-COUNSEL** (CoinGecko upstream terms) |
+
+Prohibited interpretations (verbatim from `status.json`): the local candidate proves copyright ownership; the local candidate proves authority to relicense any repository artifact; the README declaration proves artifact lineage, consent, privacy review, or training suitability; the candidate is deployed, served, promoted, or production-ready.
 
 ## Lineage (verifiable end-to-end)
 
@@ -84,11 +107,20 @@ node verify/verify.mjs --dir receipts   # source receipts, independently
 
 The manifest receipt (`quant_sft_v1.manifest.receipt.json`) is an in-toto/DSSE envelope signed by the szl-quant engine key (`keyId 5c6cf59741ade920`, pubkey committed in the repo); its subject digest pins the manifest, and the manifest pins the JSONL.
 
+Canonical source: [szl-holdings/szl-quant](https://github.com/szl-holdings/szl-quant) (GitHub, Apache-2.0).
+
 ## Honest limits
 
 - The underlying feed is **REPORTED** (public venue history) — the dataset inherits that trust level; backtest context is MEASURED replay, not market truth.
+- Upstream redistribution and commercial terms for the CoinGecko-derived closes are **under counsel review**; training eligibility stays HELD until that review clears.
 - Decisions reflect one momentum/mean-reversion strategy family on 4 assets × 365 daily bars — **narrow coverage, no claim of general market skill**.
 - Labels teach the *form* of honest reasoning; they do not certify profitable trading. The source engine's own receipts state limited/negative out-of-sample results plainly.
 - Receipts are attestations by a keyholder, not cryptographic proof of computation.
 
 Advisory research data. Paper-only lineage. Not financial advice.
+
+## Citation
+
+Part of the SZL Holdings research program; concept DOI
+[10.5281/zenodo.19944926](https://doi.org/10.5281/zenodo.19944926). No
+artifact-specific DOI is minted for this dataset.
