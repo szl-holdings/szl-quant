@@ -1,0 +1,675 @@
+{
+  "schema": "szl.quant-replay-supersession/v1",
+  "replayVersion": 8,
+  "evidenceLabel": "LOCAL_DETERMINISTIC_REPLAY_OF_ARCHIVED_REPORTED_MARKET_DATA",
+  "integrityKind": "SHA256_NOT_SIGNATURE",
+  "promotionEffect": "NONE",
+  "capitalAdmission": "NOT_ADMITTED",
+  "limitations": "Retrospective replay with modeled fill costs. No prospective prediction, external fills, model training or capital authorization.",
+  "historicalVerification": {
+    "exitCode": 0,
+    "logSha256": "9bfd7154b54be75c9bedf10b50cf81e29bd2721499daf6abf90f221adbbe4dde"
+  },
+  "producerFiles": {
+    "src/backtest-v8.mjs": "5f2fbc3a169d5cfc05316913f53e45a6a3194e8ca7c9ea2a9d7a244b20d770fd",
+    "src/strategy.mjs": "bf6642868e608273718c28de621779ea95caf489edbaf9a9a01f41f320165438",
+    "src/portfolio.mjs": "cffea213ab0c777f7d59d9d75cc449abf5d153308d9dde0818aadcf527b26f11",
+    "src/formulas.mjs": "f3836654505d42eb41deb91638697642440e33050529bc9e1494fd8ca8256bad",
+    "verify/verify.mjs": "a238f1a66093f3f6bffec90d5bdc98f66c20d3687cc7ba1086dfbe736f3d610d"
+  },
+  "results": [
+    {
+      "historicalReceipt": "backtest_BONK_365d.receipt.json",
+      "historicalReceiptSha256": "35b0b8d78c8a5b224af4cf991fd8ba43540928191fab0a2de94ec9693df3cf21",
+      "datasetSha256": "2217f089c27d8f15529b867a8535f423a63bce3d67236c9ac3da31ea40c6d0dc",
+      "historicalReplayVersion": 7,
+      "historicalResults": {
+        "cherryPickNote": "ALL configs reported (full population). Selecting the best cell after the fact is multiple testing — see METHODOLOGY.md.",
+        "inSampleBars": 256,
+        "outOfSampleBars": 110,
+        "populationSize": 5,
+        "results": [
+          {
+            "inSample": {
+              "finalEquityUsd": 8244.446663,
+              "maxDrawdown": 0.1823689259564419,
+              "nRoundTrips": 4,
+              "nTrades": 9,
+              "openAtEnd": true,
+              "totalReturn": -0.17555533369999998,
+              "winRate": 0.25,
+              "winRateNote": "only 4 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9000.004995,
+              "maxDrawdown": 0.15624926770387257,
+              "nRoundTrips": 4,
+              "nTrades": 9,
+              "openAtEnd": true,
+              "totalReturn": -0.09999950050000006,
+              "winRate": 0.5,
+              "winRateNote": "only 4 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 14,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8729.776936,
+              "maxDrawdown": 0.15265739455050117,
+              "nRoundTrips": 6,
+              "nTrades": 12,
+              "openAtEnd": false,
+              "totalReturn": -0.1270223064,
+              "winRate": 0.16666666666666666,
+              "winRateNote": "only 6 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 8866.671663,
+              "maxDrawdown": 0.16874927156813155,
+              "nRoundTrips": 4,
+              "nTrades": 9,
+              "openAtEnd": true,
+              "totalReturn": -0.11333283370000014,
+              "winRate": 0.25,
+              "winRateNote": "only 4 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9272.727272,
+              "maxDrawdown": 0.09090909100000008,
+              "nRoundTrips": 1,
+              "nTrades": 2,
+              "openAtEnd": false,
+              "totalReturn": -0.07272727280000002,
+              "winRate": 0,
+              "winRateNote": "only 1 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9333.336664,
+              "maxDrawdown": 0.12499941412091048,
+              "nRoundTrips": 3,
+              "nTrades": 6,
+              "openAtEnd": false,
+              "totalReturn": -0.06666633359999996,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 56,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8971.287862,
+              "maxDrawdown": 0.13549677937816446,
+              "nRoundTrips": 7,
+              "nTrades": 14,
+              "openAtEnd": false,
+              "totalReturn": -0.10287121380000008,
+              "winRate": 0.2857142857142857,
+              "winRateNote": "only 7 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9183.33583,
+              "maxDrawdown": 0.13906199662533078,
+              "nRoundTrips": 4,
+              "nTrades": 9,
+              "openAtEnd": true,
+              "totalReturn": -0.08166641699999999,
+              "winRate": 0.25,
+              "winRateNote": "only 4 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1.5,
+              "zWindow": 10
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8484.849089,
+              "maxDrawdown": 0.15151509110000005,
+              "nRoundTrips": 3,
+              "nTrades": 6,
+              "openAtEnd": false,
+              "totalReturn": -0.15151509110000005,
+              "winRate": 0,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9000.004996,
+              "maxDrawdown": 0.15624926768922404,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.09999950040000005,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 0.5,
+              "zWindow": 30
+            }
+          }
+        ],
+        "splitIndex": 256
+      },
+      "supersessionReason": "generation-7 warmup permitted pre-split OOS fills; win rate used raw prices; drawdown omitted initial equity",
+      "state": "BLOCKED_INVALID_V8_INPUT",
+      "reason": "replay requires finite positive prices and ordered daily timestamps without gaps"
+    },
+    {
+      "historicalReceipt": "backtest_BTC_365d.receipt.json",
+      "historicalReceiptSha256": "505f6ab383998ce4cfe91ab5ba741b5af815d1d12125816468057c409d692107",
+      "datasetSha256": "5b8b2fb11dc22701725bffd3d22c79c81a62f10e9072e6c9a55ae827d1363050",
+      "historicalReplayVersion": 7,
+      "historicalResults": {
+        "cherryPickNote": "ALL configs reported (full population). Selecting the best cell after the fact is multiple testing — see METHODOLOGY.md.",
+        "inSampleBars": 256,
+        "outOfSampleBars": 110,
+        "populationSize": 5,
+        "results": [
+          {
+            "inSample": {
+              "finalEquityUsd": 9412.521594,
+              "maxDrawdown": 0.0609497769870703,
+              "nRoundTrips": 8,
+              "nTrades": 17,
+              "openAtEnd": true,
+              "totalReturn": -0.058747840600000045,
+              "winRate": 0.375,
+              "winRateNote": "only 8 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9832.830915,
+              "maxDrawdown": 0.061816208992585504,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.01671690849999996,
+              "winRate": 0.6666666666666666,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 14,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9294.768061,
+              "maxDrawdown": 0.08699774777308115,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.07052319389999995,
+              "winRate": 0,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9787.727102,
+              "maxDrawdown": 0.054973740426738214,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.021227289799999882,
+              "winRate": 0.6666666666666666,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9353.841436,
+              "maxDrawdown": 0.07904693222774055,
+              "nRoundTrips": 2,
+              "nTrades": 4,
+              "openAtEnd": false,
+              "totalReturn": -0.0646158563999999,
+              "winRate": 0,
+              "winRateNote": "only 2 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9789.607754,
+              "maxDrawdown": 0.0557612133930431,
+              "nRoundTrips": 2,
+              "nTrades": 4,
+              "openAtEnd": false,
+              "totalReturn": -0.02103922459999996,
+              "winRate": 0.5,
+              "winRateNote": "only 2 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 56,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9239.121763,
+              "maxDrawdown": 0.0894956410059341,
+              "nRoundTrips": 5,
+              "nTrades": 11,
+              "openAtEnd": true,
+              "totalReturn": -0.07608782370000011,
+              "winRate": 0,
+              "winRateNote": "only 5 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 10161.378778,
+              "maxDrawdown": 0.024883726704774654,
+              "nRoundTrips": 4,
+              "nTrades": 9,
+              "openAtEnd": true,
+              "totalReturn": 0.01613787780000009,
+              "winRate": 0.75,
+              "winRateNote": "only 4 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1.5,
+              "zWindow": 10
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9144.298897,
+              "maxDrawdown": 0.11085708343728294,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.08557011029999995,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9711.832796,
+              "maxDrawdown": 0.050874688095121155,
+              "nRoundTrips": 2,
+              "nTrades": 4,
+              "openAtEnd": false,
+              "totalReturn": -0.02881672039999994,
+              "winRate": 0.5,
+              "winRateNote": "only 2 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 0.5,
+              "zWindow": 30
+            }
+          }
+        ],
+        "splitIndex": 256
+      },
+      "supersessionReason": "generation-7 warmup permitted pre-split OOS fills; win rate used raw prices; drawdown omitted initial equity",
+      "state": "BLOCKED_INVALID_V8_INPUT",
+      "reason": "replay requires finite positive prices and ordered daily timestamps without gaps"
+    },
+    {
+      "historicalReceipt": "backtest_ETH_365d.receipt.json",
+      "historicalReceiptSha256": "48dcbf0158fae737041e074d41339bb4a99613949c5473cc1fc0051fe0ab61f4",
+      "datasetSha256": "f7fd2c533f5bb56cf06c18b2aed2488115c20e5685539f716d6e861cf9f785e2",
+      "historicalReplayVersion": 7,
+      "historicalResults": {
+        "cherryPickNote": "ALL configs reported (full population). Selecting the best cell after the fact is multiple testing — see METHODOLOGY.md.",
+        "inSampleBars": 256,
+        "outOfSampleBars": 110,
+        "populationSize": 5,
+        "results": [
+          {
+            "inSample": {
+              "finalEquityUsd": 9398.906434,
+              "maxDrawdown": 0.09187306429947376,
+              "nRoundTrips": 8,
+              "nTrades": 16,
+              "openAtEnd": false,
+              "totalReturn": -0.06010935659999994,
+              "winRate": 0.5,
+              "winRateNote": "only 8 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9663.871805,
+              "maxDrawdown": 0.07827007360173521,
+              "nRoundTrips": 6,
+              "nTrades": 13,
+              "openAtEnd": true,
+              "totalReturn": -0.033612819499999946,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 6 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 14,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8984.490713,
+              "maxDrawdown": 0.11884978951803192,
+              "nRoundTrips": 6,
+              "nTrades": 13,
+              "openAtEnd": true,
+              "totalReturn": -0.10155092870000004,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 6 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 10394.209115,
+              "maxDrawdown": 0.03471876313145487,
+              "nRoundTrips": 2,
+              "nTrades": 5,
+              "openAtEnd": true,
+              "totalReturn": 0.03942091149999993,
+              "winRate": 1,
+              "winRateNote": "only 2 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9345.537159,
+              "maxDrawdown": 0.09733682086267978,
+              "nRoundTrips": 3,
+              "nTrades": 6,
+              "openAtEnd": false,
+              "totalReturn": -0.06544628410000009,
+              "winRate": 0.6666666666666666,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9662.579457,
+              "maxDrawdown": 0.07700426294664771,
+              "nRoundTrips": 2,
+              "nTrades": 4,
+              "openAtEnd": false,
+              "totalReturn": -0.03374205429999999,
+              "winRate": 0.5,
+              "winRateNote": "only 2 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 56,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8701.933583,
+              "maxDrawdown": 0.15073276779999997,
+              "nRoundTrips": 6,
+              "nTrades": 13,
+              "openAtEnd": true,
+              "totalReturn": -0.1298066417,
+              "winRate": 0,
+              "winRateNote": "only 6 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 10388.354324,
+              "maxDrawdown": 0.03471876313145487,
+              "nRoundTrips": 1,
+              "nTrades": 3,
+              "openAtEnd": true,
+              "totalReturn": 0.03883543239999998,
+              "winRate": 1,
+              "winRateNote": "only 1 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1.5,
+              "zWindow": 10
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8945.369117,
+              "maxDrawdown": 0.13202134249960235,
+              "nRoundTrips": 5,
+              "nTrades": 11,
+              "openAtEnd": true,
+              "totalReturn": -0.10546308829999995,
+              "winRate": 0.4,
+              "winRateNote": "only 5 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 10193.717391,
+              "maxDrawdown": 0.017758313572017004,
+              "nRoundTrips": 1,
+              "nTrades": 2,
+              "openAtEnd": false,
+              "totalReturn": 0.019371739100000118,
+              "winRate": 1,
+              "winRateNote": "only 1 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 0.5,
+              "zWindow": 30
+            }
+          }
+        ],
+        "splitIndex": 256
+      },
+      "supersessionReason": "generation-7 warmup permitted pre-split OOS fills; win rate used raw prices; drawdown omitted initial equity",
+      "state": "BLOCKED_INVALID_V8_INPUT",
+      "reason": "replay requires finite positive prices and ordered daily timestamps without gaps"
+    },
+    {
+      "historicalReceipt": "backtest_SOL_365d.receipt.json",
+      "historicalReceiptSha256": "8205acd3adc37e777ea4e494dae31886894efd4bc68f7e8e5be9c18f25ef4b9f",
+      "datasetSha256": "0eadfca48430a0fb9e008f5b712427f665bebd2013f7e96b646f975bebd1ba51",
+      "historicalReplayVersion": 7,
+      "historicalResults": {
+        "cherryPickNote": "ALL configs reported (full population). Selecting the best cell after the fact is multiple testing — see METHODOLOGY.md.",
+        "inSampleBars": 256,
+        "outOfSampleBars": 110,
+        "populationSize": 5,
+        "results": [
+          {
+            "inSample": {
+              "finalEquityUsd": 8716.568007,
+              "maxDrawdown": 0.16108240976439164,
+              "nRoundTrips": 8,
+              "nTrades": 17,
+              "openAtEnd": true,
+              "totalReturn": -0.12834319930000004,
+              "winRate": 0.625,
+              "winRateNote": "only 8 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9735.773681,
+              "maxDrawdown": 0.087544962821651,
+              "nRoundTrips": 5,
+              "nTrades": 10,
+              "openAtEnd": false,
+              "totalReturn": -0.026422631899999938,
+              "winRate": 0.6,
+              "winRateNote": "only 5 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 14,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9164.510856,
+              "maxDrawdown": 0.1283266750399487,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.0835489143999999,
+              "winRate": 0.6666666666666666,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9625.664417,
+              "maxDrawdown": 0.07926335829918504,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.03743355830000006,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8965.490822,
+              "maxDrawdown": 0.12503175055802698,
+              "nRoundTrips": 3,
+              "nTrades": 6,
+              "openAtEnd": false,
+              "totalReturn": -0.10345091780000004,
+              "winRate": 0,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9684.438184,
+              "maxDrawdown": 0.08070765289839639,
+              "nRoundTrips": 5,
+              "nTrades": 10,
+              "openAtEnd": false,
+              "totalReturn": -0.031556181599999955,
+              "winRate": 0.6,
+              "winRateNote": "only 5 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 56,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1,
+              "zWindow": 20
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 9136.593208,
+              "maxDrawdown": 0.13400319846995806,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.08634067919999999,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9480.029301,
+              "maxDrawdown": 0.07926335829918504,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.05199706989999997,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 1.5,
+              "zWindow": 10
+            }
+          },
+          {
+            "inSample": {
+              "finalEquityUsd": 8749.565204,
+              "maxDrawdown": 0.1744114454676162,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.12504347959999995,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "outOfSample": {
+              "finalEquityUsd": 9684.522966,
+              "maxDrawdown": 0.08078455188114331,
+              "nRoundTrips": 3,
+              "nTrades": 7,
+              "openAtEnd": true,
+              "totalReturn": -0.031547703399999905,
+              "winRate": 0.3333333333333333,
+              "winRateNote": "only 3 round trips — win rate is statistically weak evidence"
+            },
+            "params": {
+              "momentumLookback": 28,
+              "positionFraction": 0.2,
+              "volWindow": 30,
+              "zEntry": 0.5,
+              "zWindow": 30
+            }
+          }
+        ],
+        "splitIndex": 256
+      },
+      "supersessionReason": "generation-7 warmup permitted pre-split OOS fills; win rate used raw prices; drawdown omitted initial equity",
+      "state": "BLOCKED_INVALID_V8_INPUT",
+      "reason": "replay requires finite positive prices and ordered daily timestamps without gaps"
+    }
+  ],
+  "receiptSha256": "95cf6a818a33ab19f4e0e6504511f6f6605fe51ebe825a7c89fffc0231850ee0"
+}

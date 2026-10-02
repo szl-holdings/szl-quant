@@ -109,24 +109,17 @@ async function cmdBacktest() {
       datasetArchive: {
         path: datasetArchivePath(hist.dataset.sha256),
         scheme: 'content-addressed: filename = dataset.sha256 = sha256(canonical-json(series)); file content is exactly the hashed bytes',
-        note: 'generation 7 — the verifier recomputes every walk-forward number below from these bytes and requires bit-exact agreement',
+        note: 'generation 8 — the verifier recomputes every walk-forward number below from these bytes and requires bit-exact agreement',
       },
       method: {
         kind: 'walk-forward replay, decisions at close t filled at close t+1 (no lookahead)',
         costModel: { ...COST_MODEL, label: 'MODELED' },
         grid: GRID,
-        replay: { ...REPLAY, note: 'deterministic replay contract — the recomputation inputs (generation 7)' },
+        replay: { ...REPLAY, version: 8, note: 'generation 8: read-only context, post-split decisions/fills, net costs and initial-equity drawdown' },
         label: 'MEASURED',                       // replay of real history
         limits: 'Daily bars only; long-only; no shorting/leverage; small-n win rates are weak evidence; multiple-testing risk disclosed (full population reported).',
       },
-      walkForward: {
-        splitIndex: wf.splitIndex,
-        inSampleBars: wf.inSampleBars,
-        outOfSampleBars: wf.outOfSampleBars,
-        populationSize: wf.populationSize,
-        cherryPickNote: wf.cherryPickNote,
-        results: wf.results,
-      },
+      walkForward: wf,
     };
     const { envelope } = signReceipt({
       predicateType: PREDICATE.backtest,
@@ -136,7 +129,7 @@ async function cmdBacktest() {
       privateKey: keys.privateKey,
       publicKey: keys.publicKey,
     });
-    const file = join(outDir, `backtest_${symbol}_${days}d.receipt.json`);
+    const file = join(outDir, `backtest_${symbol}_${days}d_v8.receipt.json`);
     writeFileSync(file, JSON.stringify(envelope, null, 2) + '\n');
     for (const r of wf.results) {
       const oos = r.outOfSample;

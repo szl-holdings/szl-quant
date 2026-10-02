@@ -1409,6 +1409,100 @@ function walkForwardM7(series, grid, costModel, isFraction, startingCashUsd) {
     results,
   };
 }
+// Generation-8 independent recomputation; generation 7 above remains frozen.
+function validateReplayM8(series, params, costModel, startingCashUsd) {
+  if (!Array.isArray(series) || series.length < 2) throw new Error('at least two ordered daily bars required');
+  for (let i = 0; i < series.length; i++) {
+    const row = series[i];
+    if (!row || !Number.isSafeInteger(row.tMs) || Math.abs(row.tMs) > 8.64e15 ||
+        !Number.isFinite(row.close) || row.close <= 0 ||
+        (i > 0 && row.tMs - series[i - 1].tMs !== 86_400_000)) {
+      throw new Error('replay requires finite positive prices and ordered daily timestamps without gaps');
+    }
+  }
+  if (!params || !['momentumLookback', 'zWindow', 'volWindow'].every((key) => Number.isSafeInteger(params[key]) && params[key] >= 1) ||
+      !Number.isFinite(params.zEntry) || params.zEntry < 0 || !Number.isFinite(params.positionFraction) ||
+      params.positionFraction <= 0 || params.positionFraction > 1) throw new Error('invalid replay parameters');
+  if (!Number.isFinite(startingCashUsd) || startingCashUsd <= 0) throw new Error('invalid starting cash');
+  if (!costModel || !Number.isFinite(costModel.feeBps) || costModel.feeBps < 0 ||
+      !Number.isFinite(costModel.slippageBps) || costModel.slippageBps < 0 ||
+      costModel.feeBps + costModel.slippageBps >= 10000) throw new Error('invalid modeled costs');
+}
+
+function replaySeriesM8(series, params, costModel, startingCashUsd = 10000, bounds = {}) {
+  validateReplayM8(series, params, costModel, startingCashUsd);
+  const scoreStartIndex = bounds.scoreStartIndex ?? 0;
+  const scoreEndIndex = bounds.scoreEndIndex ?? series.length;
+  if (!Number.isSafeInteger(scoreStartIndex) || !Number.isSafeInteger(scoreEndIndex) ||
+      scoreStartIndex < 0 || scoreEndIndex > series.length || scoreStartIndex >= scoreEndIndex) throw new Error('invalid score boundaries');
+  const warmup = Math.max(params.momentumLookback, params.zWindow, params.volWindow) + 2;
+  const firstDecisionIndex = Math.max(warmup, scoreStartIndex);
+  const book = makeBookM7({ startingCashUsd, costModel });
+  const equityCurve = [{ index: scoreStartIndex, equityUsd: microStrB(book.cashMicro) }];
+  const fills = [], roundTrips = [];
+  let entry = null, modeledCostMicro = 0n;
+  for (let i = firstDecisionIndex; i < scoreEndIndex - 1; i++) {
+    const action = evaluateActionM7(series.slice(0, i + 1), params);
+    const nextBar = series[i + 1];
+    const atIso = new Date(nextBar.tMs).toISOString();
+    const before = book.cashMicro;
+    let fill;
+    if (action === 'ENTER_LONG' && entry === null) {
+      const notional = Math.floor(Number(microStrB(book.cashMicro)) * params.positionFraction * 100) / 100;
+      if (notional >= 10) fill = paperFillM7(book, { asset: 'ASSET', side: 'BUY', notionalUsd: notional, price: nextBar.close, atIso, reason: 'ENTER_LONG @ next close (no lookahead)' });
+    } else if (action === 'EXIT_LONG' && entry !== null) {
+      fill = paperFillM7(book, { asset: 'ASSET', side: 'SELL', qtyE9: book.positions.ASSET.qtyE9, price: nextBar.close, atIso, reason: 'EXIT_LONG @ next close (no lookahead)' });
+    }
+    if (fill) {
+      const delta = book.cashMicro - before;
+      const gross = BigInt(fill.qtyE9) * toMicroB(nextBar.close) / QTY_B;
+      const cost = fill.side === 'BUY' ? -delta - gross : gross - delta;
+      modeledCostMicro += cost;
+      const recorded = { side: fill.side, decisionIndex: i, fillIndex: i + 1, atIso, price: String(nextBar.close),
+                         qtyE9: fill.qtyE9, cashDeltaMicro: delta.toString(), modeledCostMicro: cost.toString() };
+      fills.push(recorded);
+      if (fill.side === 'BUY') entry = recorded;
+      else {
+        const net = BigInt(entry.cashDeltaMicro) + delta;
+        roundTrips.push({ entryFillIndex: entry.fillIndex, exitFillIndex: i + 1, netPnlMicro: net.toString(), win: net > 0n });
+        entry = null;
+      }
+    }
+    const mark = markToMarketM7(book, { ASSET: nextBar.close }, atIso);
+    equityCurve.push({ index: i + 1, equityUsd: mark.equityUsd });
+  }
+  const last = series[scoreEndIndex - 1];
+  const finalMark = markToMarketM7(book, { ASSET: last.close }, new Date(last.tMs).toISOString());
+  const finalEquity = Number(finalMark.equityUsd);
+  let peak = startingCashUsd, drawdown = 0;
+  for (const row of equityCurve) {
+    const equity = Number(row.equityUsd);
+    peak = Math.max(peak, equity);
+    drawdown = Math.max(drawdown, (peak - equity) / peak);
+  }
+  const eligible = firstDecisionIndex < scoreEndIndex - 1;
+  return { replayVersion: 8, state: eligible ? 'REPLAYED' : 'INSUFFICIENT_WARMUP',
+    boundaries: { contextStartIndex: 0, scoreStartIndex, scoreEndIndex,
+                  firstDecisionIndex: eligible ? firstDecisionIndex : null, firstFillIndex: eligible ? firstDecisionIndex + 1 : null },
+    finalEquityUsd: finalEquity, totalReturn: finalEquity / startingCashUsd - 1, maxDrawdown: drawdown,
+    nTrades: fills.length, nRoundTrips: roundTrips.length,
+    winRate: roundTrips.length ? roundTrips.filter((trip) => trip.win).length / roundTrips.length : null,
+    winRateBasis: 'NET_AFTER_MODELED_FEES_AND_SLIPPAGE',
+    winRateNote: roundTrips.length < 10 ? `only ${roundTrips.length} round trips — win rate is statistically weak evidence` : undefined,
+    modeledCostUsd: microStrB(modeledCostMicro), openAtEnd: entry !== null, fills, roundTrips, equityCurve };
+}
+
+function walkForwardM8(series, grid, costModel, isFraction = 0.7, startingCashUsd = 10000) {
+  if (!Number.isFinite(isFraction) || isFraction <= 0 || isFraction >= 1 || !Array.isArray(grid) || grid.length === 0) throw new Error('invalid walk-forward split or grid');
+  const splitIndex = Math.floor(series.length * isFraction);
+  if (splitIndex < 1 || splitIndex >= series.length) throw new Error('split has an empty window');
+  const results = grid.map((params) => ({ params,
+    inSample: replaySeriesM8(series, params, costModel, startingCashUsd, { scoreStartIndex: 0, scoreEndIndex: splitIndex }),
+    outOfSample: replaySeriesM8(series, params, costModel, startingCashUsd, { scoreStartIndex: splitIndex, scoreEndIndex: series.length }) }));
+  return { replayVersion: 8, splitIndex, inSampleBars: splitIndex, outOfSampleBars: series.length - splitIndex,
+           populationSize: grid.length, cherryPickNote: 'ALL declared configs reported; no selection on out-of-sample results.', results };
+}
+
 /** First-divergence finder for honest mismatch messages. */
 function diffPathM7(a, b, path = '$') {
   if (a === b) return null;
@@ -1471,9 +1565,10 @@ function recomputeBacktest(file, datasetsRoot) {
   if (!Number.isFinite(replay.isFraction) || !(replay.isFraction > 0 && replay.isFraction < 1)) fails.push('method.replay.isFraction missing/invalid — replay contract incomplete');
   if (!Number.isFinite(replay.startingCashUsd) || !(replay.startingCashUsd > 0)) fails.push('method.replay.startingCashUsd missing/invalid — replay contract incomplete');
   if (!Number.isFinite(cm.feeBps) || !Number.isFinite(cm.slippageBps)) fails.push('method.costModel missing finite feeBps/slippageBps');
+  if (replay.version !== undefined && replay.version !== 7 && replay.version !== 8) fails.push('unsupported replay version');
   if (fails.length) return { ok: false, fails };
   let recomputed;
-  try { recomputed = walkForwardM7(series, method.grid, { feeBps: cm.feeBps, slippageBps: cm.slippageBps }, replay.isFraction, replay.startingCashUsd); }
+  try { recomputed = (replay.version === 8 ? walkForwardM8 : walkForwardM7)(series, method.grid, { feeBps: cm.feeBps, slippageBps: cm.slippageBps }, replay.isFraction, replay.startingCashUsd); }
   catch (e) { return { ok: false, fails: [`replay threw: ${e.message}`] }; }
   if (canonicalize(recomputed) !== canonicalize(summary.walkForward ?? null)) {
     const where = diffPathM7(recomputed, summary.walkForward ?? null);

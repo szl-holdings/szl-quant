@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { canonicalBytes } from '../src/canonical-json.mjs';
 import { generateEngineKeypair, publicKeySpkiBase64, keyIdFromPublicKey } from '../src/keys.mjs';
 import { signReceipt, PREDICATE } from '../src/receipts.mjs';
-import { walkForward } from '../src/backtest.mjs';
+import { walkForward } from '../src/backtest-legacy-v7.mjs';
 import { datasetArchivePath, archiveDataset } from '../src/datasets.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');

@@ -10,6 +10,7 @@
  */
 import { createHash } from 'node:crypto';
 import { canonicalBytes } from '../canonical-json.mjs';
+import { admitDailySamples } from './daily-admission.mjs';
 
 const BASE = 'https://api.coingecko.com/api/v3';
 
@@ -37,12 +38,13 @@ export async function fetchDailyHistory(coinId, days, vsCurrency = 'usd') {
   if (!prices || prices.length < 2) {
     return { ok: false, unavailable: { label: 'UNAVAILABLE', note: `coingecko ${coinId}: empty/short price array` } };
   }
-  const series = prices
-    .filter((p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]) && p[1] > 0)
-    .map(([tMs, close]) => ({ tMs, close }));
-  if (series.length < 2) {
-    return { ok: false, unavailable: { label: 'UNAVAILABLE', note: `coingecko ${coinId}: no valid datapoints` } };
+  let admission;
+  try {
+    admission = admitDailySamples(prices);
+  } catch (error) {
+    return { ok: false, unavailable: { label: 'UNAVAILABLE', note: `coingecko ${coinId}: ${error.message}` } };
   }
+  const { series, ...admissionEvidence } = admission;
   const sha256 = createHash('sha256').update(canonicalBytes(series)).digest('hex');
   return {
     ok: true,
@@ -55,6 +57,8 @@ export async function fetchDailyHistory(coinId, days, vsCurrency = 'usd') {
       firstIso: new Date(series[0].tMs).toISOString(),
       lastIso: new Date(series[series.length - 1].tMs).toISOString(),
       sha256,                                // pins the exact bytes measured
+      admission: admissionEvidence,
+      rawPricesSha256: createHash('sha256').update(canonicalBytes(prices)).digest('hex'),
     },
   };
 }

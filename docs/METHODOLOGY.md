@@ -16,6 +16,22 @@ the labels mean HERE, and exactly what the backtests do and do not show.
 
 ## Backtest protocol (MEASURED)
 
+- New runs use generation 8. Carried history is read-only context: both windows
+  start with fresh cash, and the first out-of-sample decision occurs at the split,
+  filling at the next close. Receipts expose global decision/fill/scoring indices.
+- Win rates use realized proceeds minus entry cash, after modeled fees and
+  slippage. Drawdown starts from initial equity and includes the first fill costs.
+- Replay requires ordered daily timestamps without gaps; irregular or malformed
+  inputs are blocked rather than silently treated as daily observations.
+- Historical generation-7 signed receipts remain byte-for-byte intact and
+  independently recomputable. Their OOS warmup allowed pre-split fills, win rates
+  used gross prices, and drawdown omitted initial equity. Their original numbers
+  must not establish current research admission. `audit/replay-v8-supersession.json`
+  records the blocked attempt on unchanged archives; each contains a trailing
+  intraday snapshot. `audit/replay-v8-admitted-supersession.json` records corrected
+  replays after explicitly excluding that one non-daily observation per asset,
+  with exact historical receipt/raw/admitted dataset hashes and the admission rule.
+  It is local integrity evidence and grants no capital or model admission.
 - Daily bars; decisions at close *t* are filled at close *t+1* — no lookahead.
 - Long-only, no leverage, no shorting (v1 paper book enforces this in code).
 - Costs applied to every simulated fill, embedded in the effective price
