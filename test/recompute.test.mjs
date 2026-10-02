@@ -6,6 +6,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,6 +169,102 @@ test('gen7: archiveDataset refuses to write bytes that do not match the pinned s
   const series = syntheticSeries(50);
   assert.throws(() => archiveDataset(root, series, 'ab'.repeat(32)), /refusing to archive a mislabeled dataset/);
   assert.equal(existsSync(join(root, 'data', 'datasets', `${'ab'.repeat(32)}.json`)), false, 'no partial write on refusal');
+});
+
+// Run these interleavings synchronously: builtin ESM bindings are process-wide.
+// The competing create occurs immediately before the archive's actual write,
+// not before a separate existence check. Restore both bindings even on failure.
+function withArchiveWriteInterleaving(abs, beforeWrite, run) {
+  const original = fs.writeFileSync;
+  let intercepted = false;
+  fs.writeFileSync = function (file, ...args) {
+    if (file === abs && !intercepted) {
+      intercepted = true;
+      beforeWrite(original);
+    }
+    return original.call(this, file, ...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    const result = run();
+    assert.equal(intercepted, true, 'the competing create must reach the write boundary');
+    return result;
+  } finally {
+    fs.writeFileSync = original;
+    syncBuiltinESMExports();
+  }
+}
+
+function archiveRaceFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'quant-archive-race-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const series = [{ tMs: 1, close: 100 }, { tMs: 2, close: 101 }];
+  const bytes = canonicalBytes(series);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  const rel = datasetArchivePath(sha);
+  return { root, series, bytes, sha, rel, abs: join(root, rel) };
+}
+
+test('gen7: exclusive archive creation preserves serial idempotence', (t) => {
+  const fx = archiveRaceFixture(t);
+  assert.deepEqual(archiveDataset(fx.root, fx.series, fx.sha), {
+    path: fx.rel, bytes: fx.bytes.length, existed: false,
+  });
+  assert.deepEqual(archiveDataset(fx.root, fx.series, fx.sha), {
+    path: fx.rel, bytes: fx.bytes.length, existed: true,
+  });
+  assert.deepEqual(readFileSync(fx.abs), fx.bytes);
+});
+
+test('gen7: archive write race accepts matching winner without overwriting', (t) => {
+  const fx = archiveRaceFixture(t);
+  const result = withArchiveWriteInterleaving(fx.abs,
+    (write) => write(fx.abs, fx.bytes, { flag: 'wx' }),
+    () => archiveDataset(fx.root, fx.series, fx.sha));
+  assert.deepEqual(result, { path: fx.rel, bytes: fx.bytes.length, existed: true });
+  assert.deepEqual(readFileSync(fx.abs), fx.bytes);
+});
+
+test('gen7: archive write race refuses different winner and preserves its bytes', (t) => {
+  const fx = archiveRaceFixture(t);
+  const competing = Buffer.from('MODELED competing archive bytes');
+  assert.throws(() => withArchiveWriteInterleaving(fx.abs,
+    (write) => write(fx.abs, competing, { flag: 'wx' }),
+    () => archiveDataset(fx.root, fx.series, fx.sha)), /archive collision/);
+  assert.deepEqual(readFileSync(fx.abs), competing);
+});
+
+test('gen7: archive write race never truncates a competing hardlink target', (t) => {
+  const fx = archiveRaceFixture(t);
+  const target = join(fx.root, 'competing-target.json');
+  const competing = Buffer.from('MODELED hardlink target must remain unchanged');
+  writeFileSync(target, competing, { flag: 'wx' });
+  assert.throws(() => withArchiveWriteInterleaving(fx.abs,
+    () => fs.linkSync(target, fx.abs),
+    () => archiveDataset(fx.root, fx.series, fx.sha)), /archive collision/);
+  assert.deepEqual(readFileSync(target), competing);
+  assert.deepEqual(readFileSync(fx.abs), competing);
+});
+
+test('gen7: archive write errors other than EEXIST propagate without retry', (t) => {
+  const fx = archiveRaceFixture(t);
+  const failure = Object.assign(new Error('synthetic permission refusal'), { code: 'EACCES' });
+  let writes = 0;
+  assert.throws(() => withArchiveWriteInterleaving(fx.abs, () => {
+    writes += 1;
+    throw failure;
+  }, () => archiveDataset(fx.root, fx.series, fx.sha)), (error) => error === failure);
+  assert.equal(writes, 1);
+  assert.equal(existsSync(fx.abs), false);
+});
+
+test('gen7: incomplete competing archive fails closed without repairing its bytes', (t) => {
+  const fx = archiveRaceFixture(t);
+  const partial = fx.bytes.subarray(0, 1);
+  assert.throws(() => withArchiveWriteInterleaving(fx.abs,
+    (write) => write(fx.abs, partial, { flag: 'wx' }),
+    () => archiveDataset(fx.root, fx.series, fx.sha)), /archive collision/);
+  assert.deepEqual(readFileSync(fx.abs), partial);
 });
 
 test('gen7: the repo\u2019s own committed receipts verify (recompute or honest skip, never FAIL)', () => {
