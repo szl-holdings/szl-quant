@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Additive replay evidence. Never overwrites or re-signs historical receipts.
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -12,7 +12,6 @@ import { admitDailySamples } from '../src/ingest/daily-admission.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const output = resolve(process.argv[2] ?? join(root, 'audit/replay-v8-supersession.json'));
-if (existsSync(output)) throw new Error('output already exists; preserve prior evidence and choose another path');
 const verified = spawnSync(process.execPath, [join(root, 'verify/verify.mjs'), '--pubkey', join(root, 'keys/engine_pubkey.json'),
   '--dir', join(root, 'receipts'), '--datasets-root', root], { encoding: 'utf8' });
 if (verified.status !== 0) throw new Error('historical signature/recomputation verification failed; supersession denied');
@@ -49,6 +48,12 @@ for (const name of readdirSync(join(root, 'receipts')).filter((name) => /^backte
 }
 report.receiptSha256 = hash(canonicalBytes(report));
 mkdirSync(dirname(output), { recursive: true });
-writeFileSync(output, JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
+// Exclusive creation is the authority; no earlier path-existence check can race it.
+const descriptor = openSync(output, 'wx');
+try {
+  writeFileSync(descriptor, JSON.stringify(report, null, 2) + '\n');
+} finally {
+  closeSync(descriptor);
+}
 console.log(JSON.stringify({ output, replayed: report.results.filter((row) => row.state === 'REPLAYED').length,
   blocked: report.results.filter((row) => row.state !== 'REPLAYED').length, receiptSha256: report.receiptSha256, promotionEffect: report.promotionEffect }));
