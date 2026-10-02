@@ -18,7 +18,7 @@
  *    stays REPORTED, only the replay over it is MEASURED.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalBytes } from './canonical-json.mjs';
 
@@ -46,13 +46,19 @@ export function archiveDataset(rootDir, series, expectedSha256) {
   const rel = datasetArchivePath(sha);
   const abs = join(rootDir, rel);
   mkdirSync(join(rootDir, DATASETS_DIR), { recursive: true });
-  if (existsSync(abs)) {
+  try {
+    // Creation itself must be exclusive: an existence check followed by 'w'
+    // can truncate a competing file or hardlink created between those calls.
+    writeFileSync(abs, bytes, { flag: 'wx' });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // Reuse only byte-identical completed archives. An incomplete competing
+    // write also fails closed; this is not a concurrent-writer wait protocol.
     const prev = readFileSync(abs);
     if (!prev.equals(bytes)) {
       throw new Error(`archive collision at ${rel}: existing bytes differ from content hashing to the same name — refusing to overwrite (investigate immediately)`);
     }
     return { path: rel, bytes: bytes.length, existed: true };
   }
-  writeFileSync(abs, bytes);
   return { path: rel, bytes: bytes.length, existed: false };
 }
