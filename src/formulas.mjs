@@ -22,15 +22,24 @@ import { capTrust } from './canon.mjs';
 export function lambdaAggregate(scores, weights = null) {
   if (!Array.isArray(scores) || scores.length === 0) return null;
   const w = weights ?? scores.map(() => 1 / scores.length);
-  if (w.length !== scores.length) return null;
-  const wSum = w.reduce((a, b) => a + b, 0);
-  if (!(wSum > 0)) return null;
+  if (!Array.isArray(w) || w.length !== scores.length) return null;
+  // Validate the entire population before a zero score can short-circuit it.
+  // Scale weights first: finite weights can still overflow when summed directly.
+  let maxWeight = 0;
+  for (let i = 0; i < scores.length; i++) {
+    if (!Number.isFinite(scores[i]) || scores[i] < 0 || scores[i] > 1 ||
+        !Number.isFinite(w[i]) || w[i] < 0) return null;
+    maxWeight = Math.max(maxWeight, w[i]);
+  }
+  if (!(maxWeight > 0)) return null;
+  const scaled = w.map((weight) => weight / maxWeight);
+  const wSum = scaled.reduce((a, b) => a + b, 0);
   let logSum = 0;
   for (let i = 0; i < scores.length; i++) {
     const s = scores[i];
-    if (!Number.isFinite(s) || s < 0 || s > 1) return null;
-    if (s === 0) return 0; // geometric mean: any zero → zero
-    logSum += (w[i] / wSum) * Math.log(s);
+    if (w[i] === 0) continue; // zero-weight components have no contribution
+    if (s === 0) return 0; // positive-weight zero is dominant
+    logSum += (scaled[i] / wSum) * Math.log(s);
   }
   return Math.exp(logSum);
 }

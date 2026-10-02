@@ -22,7 +22,8 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalBytes } from './canonical-json.mjs';
 
-export const DATASETS_DIR = join('data', 'datasets');
+// Receipts use portable POSIX paths; only filesystem access uses native join().
+export const DATASETS_DIR = 'data/datasets';
 
 /** Repo-relative archive path for a dataset sha (the receipt records this). */
 export function datasetArchivePath(sha256) {
