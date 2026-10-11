@@ -1,0 +1,32 @@
+{
+  "schema": "szl.native-dataset-card-projection/v1",
+  "evidence_class": "UNSIGNED_SOURCE_PRESENTATION",
+  "source_repository": "szl-holdings/szl-quant",
+  "base_revision": "f3061f52d41e6ff8eef7f62ad331d8d4bc1c5fd4",
+  "source_path": "sft/DATASET_CARD.md",
+  "before_sha256": "c1bf615e3c5fddcb201555049258fd7488a7d5d6bb0eb082b16217a7b40fbb90",
+  "after_sha256": "bdbc4d9595af342172c568115762839add8a3060f58ebcd587c081503cd5e946",
+  "frontmatter_sha256": "1a71517e0b54ded9861811d6af0ace8124178241cd2346b13429243a407f9e60",
+  "preserved_technical_body_sha256": "86732b9edbadce7d50850d2ac05264f69cb7ff74d4855b2c013a5c2a07b2dff6",
+  "original_bytes_reconstructable": true,
+  "change": "NATIVE_IDENTITY_AFTER_PRESERVED_TRAINING_HOLD",
+  "native_art": {
+    "repository": "szl-holdings/szl-brand",
+    "revision": "27d12e77fc0f9f1a0e5fae8b34adf2380d51d070",
+    "path": "kit/logos/orbit-v2/suite/szl-icon-32.svg",
+    "sha256": "6e2b7d72a3af3d9602b79de41df0194ede6496a9661f057108ec224c0efc92e6",
+    "render_width": 40,
+    "render_height": 40,
+    "license": "CC-BY-4.0",
+    "license_scope": "SZL artwork"
+  },
+  "canonical_publisher": null,
+  "publisher_changed": false,
+  "technical_body_changed": false,
+  "metadata_changed": false,
+  "underlying_dataset_records_changed": false,
+  "authority_or_training_claim_changed": false,
+  "historical_presentation_manifest_changed": false,
+  "provider_publication": "NOT_ESTABLISHED_BY_THIS_SOURCE_RECORD",
+  "publication_hold": "No admitted Hub card-body writer qualified; source-only presentation."
+}

@@ -34,6 +34,8 @@ configs:
 > The Apache-2.0 declaration covers this repository's own materials (generator
 > output, manifests, receipts); it does not license the upstream price feed.
 
+<p><a href="https://github.com/szl-holdings/szl-quant"><img src="https://raw.githubusercontent.com/szl-holdings/szl-brand/27d12e77fc0f9f1a0e5fae8b34adf2380d51d070/kit/logos/orbit-v2/suite/szl-icon-32.svg" alt="SZL Holdings" width="40" height="40" /></a></p>
+
 **Every row in this dataset is derived deterministically from a DSSE-signed backtest receipt and is recomputable bit-exact from content-addressed archives.** No row was hand-written, scraped, or synthesized by a model.
 
 ## Evidence boundary (from `status.json`, observed 2026-09-25)
@@ -124,3 +126,6 @@ Advisory research data. Paper-only lineage. Not financial advice.
 Part of the SZL Holdings research program; concept DOI
 [10.5281/zenodo.19944926](https://doi.org/10.5281/zenodo.19944926). No
 artifact-specific DOI is minted for this dataset.
+
+
+Artwork: SZL Orbit · © 2026 SZL Holdings / Stephen Lutar · [CC BY 4.0](https://github.com/szl-holdings/szl-brand/blob/27d12e77fc0f9f1a0e5fae8b34adf2380d51d070/kit/LICENSE).
