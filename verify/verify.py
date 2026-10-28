@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""verify.py: Python twin of verify/verify.mjs (receipt and chain checks).
+"""verify.py: Python twin of verify/verify.mjs (receipt, chain and refusal checks).
 
 Independent like verify.mjs: imports nothing from src/ or from the JS. It
 reimplements canonical JSON (ECMAScript JSON.stringify semantics), DSSE PAE,
@@ -12,8 +12,9 @@ Usage:
     python verify/verify.py --dir receipts/
     python verify/verify.py --pubkey keys/engine_pubkey.json --dir DIR
     python verify/verify.py --pubkey keys/engine_pubkey.json --chain ledger/
+    python verify/verify.py --pubkey keys/engine_pubkey.json --refusals ledger/
 
-Scope: --book, --refusals and --witness (and the generation-7 backtest
+Scope: --book and --witness (and the generation-7 backtest
 recompute) are NOT implemented here; verify.mjs stays authoritative for
 them. A backtest receipt that verify.mjs would recompute is reported as
 "recompute: NOT ASSESSED" instead of being silently treated as covered.
@@ -522,14 +523,181 @@ def verify_chain(ledger_dir, pinned_der, out=print):
     return False
 
 
+# -------------------------------------------------------------------- refusals
+REFUSALS_RE = re.compile(r"refusals_[0-9]+\.receipt\.json")
+
+
+def _js_to_number(v):
+    if v is None:
+        return 0.0
+    if v is UNDEF:
+        return float("nan")
+    if v is True or v is False:
+        return 1.0 if v else 0.0
+    if is_number(v):
+        return float(v)
+    s = js_to_string(v).strip()
+    if s == "":
+        return 0.0
+    try:
+        if s.lower().startswith(("0x", "0o", "0b")):
+            return float(int(s, 0))
+        if s in ("Infinity", "+Infinity", "-Infinity"):
+            return float(s.replace("Infinity", "inf"))
+        if re.fullmatch(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?", s):
+            return float(s)
+    except ValueError:
+        pass
+    return float("nan")
+
+
+def js_less(a, b):
+    """The JavaScript `a < b` abstract relational comparison for JSON values."""
+    pa = a if isinstance(a, str) else (js_to_string(a) if isinstance(a, (list, dict)) else a)
+    pb = b if isinstance(b, str) else (js_to_string(b) if isinstance(b, (list, dict)) else b)
+    if isinstance(pa, str) and isinstance(pb, str):
+        return utf16_key(pa) < utf16_key(pb)
+    x, y = _js_to_number(pa), _js_to_number(pb)
+    return x < y  # NaN compares false, as in JS
+
+
+def _js_stable_sort(values, cmp):
+    import functools
+    return sorted(values, key=functools.cmp_to_key(cmp))
+
+
+def refusals_decision_mirror(name, st):
+    """Twin of refusalsDecisionMirror()."""
+    dec = get(get(st, "predicate"), "decision")
+    if not truthy(get(get(dec, "asset"), "symbol")) or not truthy(get(dec, "proposedAction")) or not truthy(get(dec, "verdict")):
+        return None
+    blocked = get(dec, "blockedBy")
+    conv = get(dec, "conviction")
+    return {
+        "file": name,
+        "symbol": get(get(dec, "asset"), "symbol"),
+        "verdict": get(dec, "verdict"),
+        "proposedAction": get(dec, "proposedAction"),
+        "conviction": conv if is_number(conv) else None,
+        "blockedBy": js_sort(list(blocked)) if isinstance(blocked, list) else [],
+    }
+
+
+def refusals_census_mirror(decisions, excluded):
+    """Twin of refusalsCensusMirror()."""
+    ordered = _js_stable_sort(decisions, lambda a, b: -1 if js_less(a["symbol"], b["symbol"]) else (1 if js_less(b["symbol"], a["symbol"]) else 0))
+    by_action, gate_counts, allowed, blocked = {}, {}, 0, 0
+    for d in ordered:
+        k = js_to_string(d["proposedAction"])
+        by_action[k] = by_action.get(k, 0) + 1
+        if d["verdict"] == "ALLOWED":
+            allowed += 1
+        else:
+            blocked += 1
+        for g in d["blockedBy"]:
+            gk = js_to_string(g) if g is not UNDEF else "undefined"
+            gate_counts[gk] = gate_counts.get(gk, 0) + 1
+    by_gate = [{"gate": g, "count": n} for g, n in sorted(gate_counts.items(), key=lambda kv: utf16_key(kv[0]))]
+    return {
+        "inputs": {"signalFiles": sorted((d["file"] for d in ordered), key=utf16_key),
+                   "excludedSignals": {"count": len(excluded), "files": sorted(excluded, key=utf16_key)}},
+        "decisions": ordered,
+        "totals": {"decisions": len(ordered), "allowed": allowed, "blocked": blocked, "byAction": by_action, "refusalsByGate": by_gate},
+    }
+
+
+def _summary_of(full):
+    try:
+        with open(full, "rb") as fh:
+            env = json_loads(fh.read().decode("utf-8"))
+        return coalesce(get(get(json_loads(base64.b64decode(get(env, "payload")).decode("utf-8")), "predicate"), "summary"), None)
+    except Exception:
+        return UNDEF
+
+
+def _statement_of(full):
+    with open(full, "rb") as fh:
+        env = json_loads(fh.read().decode("utf-8"))
+    return json_loads(base64.b64decode(get(env, "payload")).decode("utf-8"))
+
+
+def verify_refusals(ledger_dir, pinned_der, out=print):
+    """Twin of verifyRefusals(): replays every refusal census from DSSE-verified signal receipts."""
+    try:
+        dirs = sorted((e.name for e in _entries(ledger_dir) if e.is_dir(follow_symlinks=False)), key=utf16_key)
+    except OSError as exc:
+        out(f"REFUSALS FAIL: cannot read {ledger_dir}: {exc}")
+        return False
+    problems, recs = [], []
+    for d in dirs:
+        names = sorted((e.name for e in _entries(os.path.join(ledger_dir, d)) if e.is_file(follow_symlinks=False)), key=utf16_key)
+        rfs = [n for n in names if REFUSALS_RE.fullmatch(n)]
+        if len(rfs) > 1:
+            problems.append(f"{d}: {len(rfs)} refusal records in one dir (ambiguous)")
+        for rf in rfs:
+            full = os.path.join(ledger_dir, d, rf)
+            r = verify_file(full, pinned_der)
+            if not r["ok"]:
+                problems.append(f"{d}/{rf}: refusal record fails verification: {'; '.join(r['fails'])}")
+            body = _summary_of(full)
+            if not truthy(body) or get(body, "kind") != "szl-quant-refusals":
+                problems.append(f"{d}/{rf}: unreadable refusal record body")
+                continue
+            if get(body, "runDir") != d:
+                problems.append(f"{d}/{rf}: body.runDir {js_to_string(get(body, 'runDir'))} \u2260 actual dir {d}")
+            recs.append({"dir": d, "file": rf, "body": body})
+    if not recs:
+        out("REFUSALS FAIL: no refusal records found under " + ledger_dir)
+        return False
+    for rec in recs:
+        rdir = os.path.join(ledger_dir, rec["dir"])
+        sig_names = sorted((e.name for e in _entries(rdir) if e.is_file(follow_symlinks=False)
+                            and e.name.startswith("signal_") and e.name.endswith(".receipt.json")), key=utf16_key)
+        decisions, excluded = [], []
+        for n in sig_names:
+            if not verify_file(os.path.join(rdir, n), pinned_der)["ok"]:
+                excluded.append(n)
+                continue
+            try:
+                st = _statement_of(os.path.join(rdir, n))
+            except Exception:
+                excluded.append(n)
+                continue
+            dec = refusals_decision_mirror(n, st)
+            if dec is not None:
+                decisions.append(dec)
+        expect = refusals_census_mirror(decisions, excluded)
+        body = rec["body"]
+        if canonicalize(coalesce(get(body, "inputs"), None)) != canonicalize(expect["inputs"]):
+            problems.append(f"{rec['dir']}: inputs do not match the verified signal receipts on disk")
+        if canonicalize(coalesce(get(body, "decisions"), None)) != canonicalize(expect["decisions"]):
+            problems.append(f"{rec['dir']}: decision census does not REPLAY from the signed receipts")
+        if canonicalize(coalesce(get(body, "totals"), None)) != canonicalize(expect["totals"]):
+            problems.append(f"{rec['dir']}: totals do not replay \u2014 refusal counts cannot be trusted")
+    for p in problems:
+        out(f"      REFUSALS FAIL: {p}")
+    if not problems:
+        h = recs[-1]["body"]
+        totals = get(h, "totals")
+        gates = _js_stable_sort(list(coalesce(get(totals, "refusalsByGate"), [])),
+                                lambda a, b: (lambda x: 0 if x != x else (1 if x > 0 else (-1 if x < 0 else 0)))(_js_to_number(get(b, "count")) - _js_to_number(get(a, "count"))))
+        gate_txt = " ".join(f"{js_to_string(get(x, 'gate'))}\u00d7{js_to_string(get(x, 'count'))}" for x in gates)
+        out(f"REFUSALS OK  records={len(recs)}  latest {js_to_string(get(h, 'runDir'))}: BLOCKED {js_to_string(get(totals, 'blocked'))}/{js_to_string(get(totals, 'decisions'))}"
+            + (f"  by gate: {gate_txt}" if gate_txt else "") + " [MEASURED]")
+        out("      note: every count recomputed from DSSE-verified decision receipts alone \u2014 a refusal is a decision, not an absence")
+        return True
+    out("REFUSALS BROKEN")
+    return False
+
+
 # ------------------------------------------------------------------------ main
 USAGE = ("usage: python verify/verify.py [--pubkey keys/engine_pubkey.json] "
-         "(--dir receipts/ | --chain ledger/ | receipt.json ...)")
+         "(--dir receipts/ | --chain ledger/ | --refusals ledger/ | receipt.json ...)")
 
 
 def main(argv=None, out=print):
     args = list(sys.argv[1:] if argv is None else argv)
-    pinned, chain_dir, files, unsupported = None, None, [], []
+    pinned, chain_dir, refusals_dir, files, unsupported = None, None, None, [], []
     i = 0
     try:
         while i < len(args):
@@ -547,7 +715,10 @@ def main(argv=None, out=print):
             elif a == "--chain":
                 i += 1
                 chain_dir = args[i]
-            elif a in ("--book", "--refusals", "--witness", "--rekor-pubkey", "--tsa-anchors", "--observer-pubkey", "--datasets-root"):
+            elif a == "--refusals":
+                i += 1
+                refusals_dir = args[i]
+            elif a in ("--book", "--witness", "--rekor-pubkey", "--tsa-anchors", "--observer-pubkey", "--datasets-root"):
                 unsupported.append(a)
                 i += 1
             else:
@@ -562,7 +733,7 @@ def main(argv=None, out=print):
     if unsupported:
         print(f"not implemented in the Python twin (use verify.mjs): {' '.join(unsupported)}", file=sys.stderr)
         return 2
-    if not files and not chain_dir:
+    if not files and not chain_dir and not refusals_dir:
         print(USAGE, file=sys.stderr)
         return 2
     all_ok, not_assessed = True, 0
@@ -583,6 +754,8 @@ def main(argv=None, out=print):
         out(f"Recompute: {not_assessed} backtest receipt(s) NOT ASSESSED by the Python twin.")
     if chain_dir:
         all_ok = verify_chain(chain_dir, pinned, out) and all_ok
+    if refusals_dir:
+        all_ok = verify_refusals(refusals_dir, pinned, out) and all_ok
     return 0 if all_ok else 1
 
 
