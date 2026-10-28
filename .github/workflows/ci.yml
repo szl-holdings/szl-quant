@@ -42,6 +42,15 @@ jobs:
         run: |
           set -euo pipefail
           npm test 2>&1 | tee qualification-evidence/unit-tests.log
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Python verifier twin, parity with verify.mjs (receipt and chain checks)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --require-hashes --no-deps -r verify/requirements-verify.txt
+          python -m unittest discover -s test -p 'test_verify_py.py' -v 2>&1 | tee qualification-evidence/python-twin-tests.log
       - name: Verify committed receipts against pinned engine pubkey
         shell: bash
         run: |
