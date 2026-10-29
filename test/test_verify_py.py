@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parity tests: verify/verify.py against verify/verify.mjs (stdlib unittest).
 
+Covers the receipt, chain and refusal checks.
+
 Run from the repo root:
     python -m unittest discover -s test -p "test_verify_py.py" -v
 
@@ -488,10 +490,150 @@ class PublishedRunDirTests(unittest.TestCase):
         self.assertEqual((pcode, jcode), (0, 0))
 
 
+# --------------------------------------------------------- refusals parity
+def signal_decision(symbol, action, verdict, conviction=0.4, blocked=None):
+    d = {"asset": {"symbol": symbol}, "proposedAction": action, "verdict": verdict, "conviction": conviction,
+         "gates": [{"gate": g, "verdict": "BLOCKED", "reason": "fixture"} for g in (blocked or [])] or [{"gate": "G0", "verdict": "ALLOWED"}]}
+    if blocked is not None:
+        d["blockedBy"] = blocked
+    return d
+
+
+def build_refusals_ledger(root, key, run="20260201T000000Z_run1", signals=None, body_edit=None, kind="szl-quant-refusals"):
+    rdir = root / run
+    rdir.mkdir(parents=True)
+    signals = signals or [("SOL", "BUY", "ALLOWED", 0.4, []), ("JUP", "BUY", "BLOCKED", 0.2, ["liquidity", "G10"]),
+                          ("Bonk", "SELL", "BLOCKED", 0.1, ["G2", "liquidity"]), ("\u00e9t\u00e9", "HOLD", "ALLOWED", 0.3, None)]
+    for sym, action, verdict, conv, blocked in signals:
+        st = statement(signal_decision(sym, action, verdict, conv, blocked))
+        (rdir / f"signal_{sym}_1.receipt.json").write_text(json.dumps(key.envelope(payload_of(st))), encoding="utf-8")
+    decisions = []
+    for n in sorted((p.name for p in rdir.iterdir()), key=vpy.utf16_key):
+        dec = vpy.refusals_decision_mirror(n, vpy._statement_of(str(rdir / n)))
+        if dec:
+            decisions.append(dec)
+    census = vpy.refusals_census_mirror(decisions, [])
+    body = dict(census, kind=kind, runDir=run, v=1)
+    if body_edit:
+        body_edit(body)
+    st = statement(summary=body, predicate_type="https://szl.holdings/quant/refusals/v1")
+    (rdir / "refusals_1.receipt.json").write_text(json.dumps(key.envelope(payload_of(st))), encoding="utf-8")
+    return rdir
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class RefusalsTests(unittest.TestCase):
+    def setUp(self):
+        self.key = Key()
+        self.base = tmpdir(self)
+        self.pin = self.base / "pin.json"
+        self.key.pin(self.pin)
+
+    def ledger(self, **kw):
+        root = self.base / f"r{len(os.listdir(self.base))}"
+        rdir = build_refusals_ledger(root, self.key, **kw)
+        return root, rdir
+
+    def test_hand_checked_census(self):
+        root, rdir = self.ledger()
+        body = json.loads(base64.b64decode(json.loads((rdir / "refusals_1.receipt.json").read_text())["payload"]))["predicate"]["summary"]
+        self.assertEqual(body["totals"]["decisions"], 4)
+        self.assertEqual((body["totals"]["allowed"], body["totals"]["blocked"]), (2, 2))
+        self.assertEqual(body["totals"]["byAction"], {"BUY": 2, "SELL": 1, "HOLD": 1})
+        self.assertEqual(body["totals"]["refusalsByGate"], [{"gate": "G10", "count": 1}, {"gate": "G2", "count": 1}, {"gate": "liquidity", "count": 2}])
+        self.assertEqual([d["symbol"] for d in body["decisions"]], ["Bonk", "JUP", "SOL", "\u00e9t\u00e9"])
+        self.assertEqual(body["decisions"][1]["blockedBy"], ["G10", "liquidity"])
+        lines = []
+        self.assertTrue(vpy.verify_refusals(str(root), self.key.spki, out=lines.append), lines)
+        self.assertIn("BLOCKED 2/4  by gate: liquidity\u00d72 G10\u00d71 G2\u00d71", lines[0])
+
+    def mutations(self):
+        def tamper_signal(root, rdir):
+            p = rdir / "signal_SOL_1.receipt.json"
+            env = json.loads(p.read_text())
+            sig = bytearray(base64.b64decode(env["signatures"][0]["sig"]))
+            sig[0] ^= 1
+            env["signatures"][0]["sig"] = base64.b64encode(bytes(sig)).decode()
+            p.write_text(json.dumps(env))
+        def drop_signal(root, rdir):
+            (rdir / "signal_JUP_1.receipt.json").unlink()
+        def add_signal(root, rdir):
+            st = statement(signal_decision("PYTH", "BUY", "BLOCKED", 0.2, ["liquidity"]))
+            (rdir / "signal_PYTH_1.receipt.json").write_text(json.dumps(self.key.envelope(payload_of(st))))
+        def second_record(root, rdir):
+            shutil.copy(rdir / "refusals_1.receipt.json", rdir / "refusals_2.receipt.json")
+        return {
+            "clean": ({}, None),
+            "deferred_verdict": ({"signals": [("SOL", "BUY", "ALLOWED", 0.4, []), ("PYTH", "BUY", "DEFERRED", 0.2, None)]}, None),
+            "totals_lie": ({"body_edit": lambda b: b["totals"].__setitem__("blocked", 1)}, None),
+            "decision_dropped": ({"body_edit": lambda b: b["decisions"].pop()}, None),
+            "inputs_lie": ({"body_edit": lambda b: b["inputs"]["signalFiles"].pop()}, None),
+            "wrong_rundir": ({"body_edit": lambda b: b.__setitem__("runDir", "other")}, None),
+            "wrong_kind": ({"kind": "szl-quant-other"}, None),
+            "tampered_signal": ({}, tamper_signal),
+            "dropped_signal": ({}, drop_signal),
+            "added_signal": ({}, add_signal),
+            "two_records": ({}, second_record),
+        }
+
+    def test_python_refusal_verdicts(self):
+        for name, (kw, mutate) in self.mutations().items():
+            root, rdir = self.ledger(**kw)
+            if mutate:
+                mutate(root, rdir)
+            lines = []
+            self.assertEqual(vpy.verify_refusals(str(root), self.key.spki, out=lines.append), name in ("clean", "deferred_verdict"), (name, lines))
+
+    def test_any_verdict_other_than_allowed_counts_as_blocked(self):
+        sigs = [("SOL", "BUY", "ALLOWED", 0.4, []), ("PYTH", "BUY", "DEFERRED", 0.2, None)]
+        root, rdir = self.ledger(signals=sigs)
+        body = json.loads(base64.b64decode(json.loads((rdir / "refusals_1.receipt.json").read_text())["payload"]))["predicate"]["summary"]
+        self.assertEqual((body["totals"]["allowed"], body["totals"]["blocked"]), (1, 1))
+        lines = []
+        self.assertTrue(vpy.verify_refusals(str(root), self.key.spki, out=lines.append), lines)
+        self.assertIn("BLOCKED 1/2", lines[0])
+
+    def test_no_records_is_a_failure(self):
+        root = self.base / "empty"
+        (root / "20260201T000000Z_run1").mkdir(parents=True)
+        lines = []
+        self.assertFalse(vpy.verify_refusals(str(root), self.key.spki, out=lines.append))
+        self.assertIn("no refusal records found", lines[0])
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_identical_refusals_report_to_verify_mjs(self):
+        for name, (kw, mutate) in self.mutations().items():
+            root, rdir = self.ledger(**kw)
+            if mutate:
+                mutate(root, rdir)
+            jcode, jout = run_node(["--pubkey", str(self.pin), "--refusals", str(root)])
+            pcode, pout = run_py(["--pubkey", str(self.pin), "--refusals", str(root)])
+            jl = [l.strip() for l in jout.splitlines() if "REFUSALS" in l]
+            pl = [l.strip() for l in pout.splitlines() if "REFUSALS" in l]
+            self.assertEqual((pl, pcode), (jl, jcode), name)
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class PublishedRefusalsTests(unittest.TestCase):
+    def test_published_run_dir_refusal_census_replays(self):
+        lines = []
+        self.assertTrue(vpy.verify_refusals(str(FIXTURES), vpy.load_pin(str(ENGINE_PIN)), out=lines.append), lines)
+        self.assertTrue(lines[0].startswith("REFUSALS OK  records=1  latest 20260716T175421Z_run10"), lines)
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_published_refusals_report_matches_verify_mjs(self):
+        args = ["--pubkey", str(ENGINE_PIN), "--refusals", str(FIXTURES)]
+        jcode, jout = run_node(args)
+        pcode, pout = run_py(args)
+        self.assertEqual(([l.strip() for l in pout.splitlines() if "REFUSALS" in l], pcode),
+                         ([l.strip() for l in jout.splitlines() if "REFUSALS" in l], jcode))
+
+
 class CliAndPinTests(unittest.TestCase):
     def test_usage_and_unsupported_flags_exit_2(self):
         self.assertEqual(run_py([])[0], 2)
         self.assertEqual(run_py(["--book", "ledger"])[0], 2)
+        self.assertEqual(run_py(["--witness", "."])[0], 2)
         self.assertEqual(run_py(["--dir"])[0], 2)
 
     def test_bad_pins_exit_2(self):
