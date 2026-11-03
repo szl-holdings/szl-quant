@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parity tests: verify/verify.py against verify/verify.mjs (stdlib unittest).
 
-Covers the receipt, chain, book and refusal checks.
+Covers the receipt, chain, book, refusal and generation-7 recompute checks.
 
 Run from the repo root:
     python -m unittest discover -s test -p "test_verify_py.py" -v
@@ -20,6 +20,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import random
 import shutil
@@ -320,10 +321,10 @@ class ReceiptTests(unittest.TestCase):
             if needle:
                 self.assertTrue(any(needle in f for f in r["fails"]), (name, r["fails"]))
 
-    def test_backtest_receipt_is_reported_not_assessed(self):
+    def test_backtest_receipt_without_archive_is_skipped(self):
         code, out = run_py(["--pubkey", str(self.pin), str(self.rdir / "backtest_predicate.json")])
         self.assertEqual(code, 0)
-        self.assertIn("recompute: NOT ASSESSED", out)
+        self.assertIn("recompute: SKIP \u2014 pre-generation-7 receipt (no datasetArchive)", out)
 
     @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
     def test_identical_report_to_verify_mjs_pinned_and_unpinned(self):
@@ -943,6 +944,175 @@ class PublishedBookTests(unittest.TestCase):
         pcode, pout = run_py(args)
         self.assertEqual(([l.strip() for l in pout.splitlines() if "BOOK" in l], pcode),
                          ([l.strip() for l in jout.splitlines() if "BOOK" in l], jcode))
+
+
+# ------------------------------------------------- generation-7 recompute
+RECEIPTS = REPO / "receipts"
+BACKTESTS = sorted(RECEIPTS.glob("backtest_*.receipt.json"))
+
+
+def recompute_lines(text):
+    return [l.strip() for l in text.splitlines() if "ecompute" in l or l.startswith(("PASS", "FAIL", "All ", "VERIFICATION"))]
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class PublishedRecomputeTests(unittest.TestCase):
+    def test_every_committed_backtest_recomputes_bit_exact(self):
+        self.assertEqual(len(BACKTESTS), 4)
+        pinned = vpy.load_pin(str(ENGINE_PIN))
+        for p in BACKTESTS:
+            self.assertTrue(vpy.verify_file(str(p), pinned)["ok"], p.name)
+            self.assertEqual(vpy.recompute_backtest(str(p), str(REPO)), {"ok": True, "recomputed": True, "cells": 5, "bars": 366}, p.name)
+
+    def test_cli_reports_recompute_for_committed_receipts(self):
+        code, out = run_py(["--pubkey", str(ENGINE_PIN), "--dir", str(RECEIPTS)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Recompute (generation 7): 4 backtest receipt(s) re-derived bit-exact, 0 skipped (pre-gen7), 0 FAILED.", out)
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_committed_receipts_report_matches_verify_mjs(self):
+        args = ["--pubkey", str(ENGINE_PIN), "--dir", str(RECEIPTS)]
+        jcode, jout = run_node(args)
+        pcode, pout = run_py(args)
+        self.assertEqual((recompute_lines(pout), pcode), (recompute_lines(jout), jcode))
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class RecomputeTamperTests(unittest.TestCase):
+    """Re-signed copies of a real receipt (test key) and copies of its real dataset."""
+
+    def setUp(self):
+        self.key = Key()
+        self.root = tmpdir(self)
+        (self.root / "data" / "datasets").mkdir(parents=True)
+        (self.root / "receipts").mkdir()
+        self.pin = self.root / "pin.json"
+        self.key.pin(self.pin)
+        src = BACKTESTS[-1]
+        self.statement = json.loads(base64.b64decode(json.loads(src.read_text(encoding="utf-8"))["payload"]))
+        self.sha = self.statement["predicate"]["summary"]["dataset"]["sha256"]
+        shutil.copy(REPO / "data" / "datasets" / f"{self.sha}.json", self.root / "data" / "datasets" / f"{self.sha}.json")
+
+    def receipt(self, name, edit=None):
+        st = json.loads(json.dumps(self.statement))
+        if edit:
+            edit(st["predicate"]["summary"])
+        dec = st["predicate"]["summary"]
+        st["subject"] = [{"name": "fixture", "digest": {"sha256": hashlib.sha256(vpy.canonicalize(dec).encode()).hexdigest()}}]
+        p = self.root / "receipts" / f"{name}.json"
+        p.write_text(json.dumps(self.key.envelope(payload_of(st))), encoding="utf-8")
+        return p
+
+    def recompute(self, p):
+        return vpy.recompute_backtest(str(p), str(self.root))
+
+    def cases(self):
+        r0 = lambda s: s["walkForward"]["results"][0]  # noqa: E731
+        return {
+            "clean": (None, "recomputed"),
+            "equity_lie": (lambda s: r0(s)["inSample"].__setitem__("finalEquityUsd", r0(s)["inSample"]["finalEquityUsd"] + 0.000001), "RECOMPUTE MISMATCH at $.results[0].inSample.finalEquityUsd"),
+            "drawdown_lie": (lambda s: r0(s)["outOfSample"].__setitem__("maxDrawdown", 0.01), "RECOMPUTE MISMATCH at $.results[0].outOfSample.maxDrawdown"),
+            "trade_count_lie": (lambda s: r0(s)["inSample"].__setitem__("nTrades", r0(s)["inSample"]["nTrades"] + 2), "RECOMPUTE MISMATCH at $.results[0].inSample.nTrades"),
+            "dropped_cell": (lambda s: s["walkForward"]["results"].pop(), "RECOMPUTE MISMATCH at $.results.length"),
+            "grid_edit": (lambda s: s["method"]["grid"][1].__setitem__("zEntry", 2), "RECOMPUTE MISMATCH at $.results[1]"),
+            "cost_edit": (lambda s: s["method"]["costModel"].__setitem__("feeBps", 31), "RECOMPUTE MISMATCH at $.results[0]"),
+            "split_edit": (lambda s: s["method"]["replay"].__setitem__("isFraction", 0.71), "RECOMPUTE MISMATCH at $"),
+            "type_change": (lambda s: r0(s)["inSample"].__setitem__("winRate", "0.6"), "(recomputed number "),
+            "n_wrong": (lambda s: s["dataset"].__setitem__("n", 365), "dataset.n 365 \u2260 archived row count 366"),
+            "path_traversal": (lambda s: s["datasetArchive"].__setitem__("path", "data/datasets/../x.json"), "is not the canonical"),
+            "bad_sha": (lambda s: s["dataset"].__setitem__("sha256", "ABC"), "dataset.sha256 is not 64 lowercase hex chars"),
+            "missing_dataset": (lambda s: s["dataset"].__setitem__("sha256", "0" * 64) or s["datasetArchive"].__setitem__("path", f"data/datasets/{'0' * 64}.json"), "declared dataset archive MISSING"),
+            "bad_fraction": (lambda s: s["method"]["replay"].__setitem__("isFraction", 1), "method.replay.isFraction missing/invalid"),
+            "no_grid": (lambda s: s["method"].__setitem__("grid", []), "method.grid missing/empty"),
+            "version_9": (lambda s: s["method"]["replay"].__setitem__("version", 9), "unsupported replay version"),
+            "version_8": (lambda s: s["method"]["replay"].__setitem__("version", 8), "not_assessed"),
+            "fractional_window": (lambda s: s["method"]["grid"][0].__setitem__("zWindow", 20.5), "not_assessed"),
+            "no_archive": (lambda s: s.pop("datasetArchive"), "skip"),
+        }
+
+    def test_each_case(self):
+        for name, (edit, want) in self.cases().items():
+            r = self.recompute(self.receipt(name, edit))
+            if want in ("recomputed", "skip", "not_assessed"):
+                self.assertTrue(r["ok"] and r.get(want), (name, r))
+            else:
+                self.assertFalse(r["ok"], (name, r))
+                self.assertTrue(any(want in f for f in r["fails"]), (name, r["fails"]))
+
+    def test_tampered_dataset_bytes(self):
+        p = self.receipt("clean")
+        ds = self.root / "data" / "datasets" / f"{self.sha}.json"
+        ds.write_bytes(ds.read_bytes().replace(b"1", b"2", 1))
+        r = self.recompute(p)
+        self.assertFalse(r["ok"])
+        self.assertIn("dataset bytes TAMPERED or corrupted", r["fails"][0])
+
+    def test_exact_mismatch_message(self):
+        st = self.statement["predicate"]["summary"]["walkForward"]["results"][0]["inSample"]["finalEquityUsd"]
+        p = self.receipt("equity", lambda s: s["walkForward"]["results"][0]["inSample"].__setitem__("finalEquityUsd", 1.5))
+        self.assertEqual(self.recompute(p)["fails"][0],
+                         f"RECOMPUTE MISMATCH at $.results[0].inSample.finalEquityUsd (recomputed {vpy.js_number(st)} vs signed 1.5) \u2014 the signed numbers do NOT re-derive from the archived dataset (a valid signature cannot rescue false numbers)")
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_identical_recompute_report_to_verify_mjs(self):
+        for name, (edit, _) in self.cases().items():
+            self.receipt(name, edit)
+        args = ["--pubkey", str(self.pin), "--datasets-root", str(self.root), "--dir", str(self.root / "receipts")]
+        jcode, jout = run_node(args)
+        pcode, pout = run_py(args)
+        j = [l for l in recompute_lines(jout) if "generation-8" not in l and "outside what" not in l]
+        p = [l for l in recompute_lines(pout) if "NOT ASSESSED" not in l]
+        self.assertEqual((pcode, jcode), (1, 1))
+        # verify.mjs recomputes version-8 and fractional-window receipts; the twin reports them NOT ASSESSED.
+        # Every other line (PASS/FAIL headers, SKIP, OK, RECOMPUTE FAIL) must be identical.
+        drop = {"version_8.json", "fractional_window.json"}
+        def keep(lines):
+            out, skip = [], False
+            for l in lines:
+                if l.startswith(("PASS", "FAIL")):
+                    skip = any(l.endswith(d) or (d in l) for d in drop)
+                    if skip:
+                        continue
+                if not skip and not l.startswith(("All ", "VERIFICATION", "Recompute")):
+                    out.append(l)
+            return out
+        self.assertEqual(keep(p), keep(j))
+
+
+class RecomputeArithmeticTests(unittest.TestCase):
+    def test_entry_boundary_z_equals_minus_z_entry(self):
+        # win = [1, 3]: mean 2, std 1 exactly, so z = (1 - 2) / 1 = -1 = -zEntry; momentum 1 / 0.5 - 1 > 0
+        p = {"momentumLookback": 3, "zWindow": 2, "volWindow": 2, "zEntry": 1.0, "positionFraction": 0.2}
+        self.assertEqual(vpy.z_score_m7([0.5, 1.0, 3.0, 1.0], 2), -1.0)
+        self.assertEqual(vpy.evaluate_action_m7([0.5, 1.0, 3.0, 1.0], p), "ENTER_LONG")
+
+    def test_minimum_notional_boundary_is_inclusive(self):
+        # 50 USD * 0.2 = exactly 10.00 USD, the smallest allowed entry
+        # warmup = max(windows) + 2 = 5, so the decision at bar 5 sees [..., 0.5, 1, 3, 1] and fills at bar 6
+        series = [{"close": c} for c in [1.0, 1.0, 0.5, 1.0, 3.0, 1.0, 1.0, 1.0]]
+        p = {"momentumLookback": 3, "zWindow": 2, "volWindow": 2, "zEntry": 1.0, "positionFraction": 0.2}
+        self.assertEqual(vpy.replay_series_m7(series, p, 30.0, 20.0, 50.0)["nTrades"], 1)
+        self.assertEqual(vpy.replay_series_m7(series, dict(p, positionFraction=0.19), 30.0, 20.0, 50.0)["nTrades"], 0)
+
+    def test_round_trip_at_entry_price_is_not_a_win(self):
+        self.assertEqual(vpy.count_round_trips_m7([("BUY", 2.0), ("SELL", 2.0), ("BUY", 1.0), ("SELL", 1.5), ("BUY", 3.0)]), (2, 1))
+
+    def test_mean_std_is_a_left_fold(self):
+        xs = [1e16, 1.0, -1e16, 1.0]
+        ms = vpy.mean_std_m7(xs)
+        acc = 0
+        for x in xs:
+            acc = acc + x
+        self.assertEqual(ms["mean"], acc / 4)
+        self.assertNotEqual(ms["mean"], math.fsum(xs) / 4)  # a compensated sum would differ from V8's reduce
+
+    def test_actions(self):
+        p = {"momentumLookback": 2, "zWindow": 3, "volWindow": 3, "zEntry": 1.0, "positionFraction": 0.2}
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 2.0], p), "ABSTAIN")
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.1, 1.2, 1.3, 1.25], p), "ENTER_LONG")
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.5, 1.6, 1.4, 1.45], p), "HOLD")  # momentum < 0, z < 0
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.2, 1.6, 1.4, 1.55], p), "EXIT_LONG")  # momentum < 0, z > 0
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.0, 1.0, 1.0, 1.0], p), "ABSTAIN")  # zero std: z undefined
 
 
 class CliAndPinTests(unittest.TestCase):

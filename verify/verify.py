@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""verify.py: Python twin of verify/verify.mjs (receipt, chain, book and refusal checks).
+"""verify.py: Python twin of verify/verify.mjs (receipt, chain, book, refusal and generation-7 recompute checks).
 
 Independent like verify.mjs: imports nothing from src/ or from the JS. It
 reimplements canonical JSON (ECMAScript JSON.stringify semantics), DSSE PAE,
@@ -15,10 +15,10 @@ Usage:
     python verify/verify.py --pubkey keys/engine_pubkey.json --book ledger/
     python verify/verify.py --pubkey keys/engine_pubkey.json --refusals ledger/
 
-Scope: --witness (and the generation-7 backtest
-recompute) are NOT implemented here; verify.mjs stays authoritative for
-them. A backtest receipt that verify.mjs would recompute is reported as
-"recompute: NOT ASSESSED" instead of being silently treated as covered.
+Scope: --witness (Rekor, TSA, gossip) is NOT implemented here; verify.mjs
+stays authoritative for it. Generation-7 backtest receipts are recomputed
+bit-exactly; generation-8 receipts, and grids with non-integer windows, are
+reported "recompute: NOT ASSESSED" rather than treated as covered.
 
 Deliberate strictness differences from verify.mjs (reject-only):
 - base64 payloads and signatures must be well-formed (validate=True);
@@ -397,16 +397,6 @@ def _verify_env(path, env, pinned_der, fails, notes):
                 fails.append("blocking gate missing honest reason")
     return {"file": path, "ok": not fails, "fails": fails, "notes": notes, "keyid": keyid}
 
-
-def needs_recompute(path):
-    """True when verify.mjs would run its generation-7 backtest recompute on this file."""
-    try:
-        with open(path, "rb") as fh:
-            env = json_loads(fh.read().decode("utf-8"))
-        st = json_loads(base64.b64decode(get(env, "payload")).decode("utf-8"))
-    except Exception:
-        return False
-    return get(st, "predicateType") == BACKTEST_PREDICATE_M7
 
 
 # ----------------------------------------------------------------------- chain
@@ -887,6 +877,321 @@ def verify_book(ledger_dir, pinned_der, out=print):
     return False
 
 
+# -------------------------------------------------- generation-7 recompute
+# Twin of verify.mjs recomputeBacktest() for walk-forward replay version 7
+# (replay.version absent or 7). Every value that reaches the output comes
+# from + - * /, floor, max, sqrt and integer micro-units, which IEEE-754
+# makes bit-identical when the operation order is identical. Math.log feeds
+# only a null check (annualizedVol), so its last-bit behaviour cannot reach
+# a result. Generation 8 is reported NOT ASSESSED: no published receipt uses
+# it, so nothing here could prove a twin of it.
+
+class _Unsupported(Exception):
+    """Inputs outside what the twin mirrors; reported, never treated as verified."""
+
+
+def _m7_param(params, key, integer):
+    v = get(params, key)
+    if not is_number(v) or not math.isfinite(float(v)) or (integer and not float(v).is_integer()):
+        raise _Unsupported(f"grid parameter {key} is not a finite {'integer' if integer else 'number'}")
+    return int(v) if integer else float(v)
+
+
+def mean_std_m7(xs):
+    if len(xs) < 2:
+        return None
+    acc = 0
+    for b in xs:
+        acc = acc + b
+    m = acc / len(xs)
+    acc = 0
+    for b in xs:
+        acc = acc + (b - m) * (b - m)
+    return {"mean": m, "std": math.sqrt(acc / len(xs))}
+
+
+def period_return_m7(closes, lookback):
+    if len(closes) < lookback + 1:
+        return None
+    now, then = closes[-1], closes[len(closes) - 1 - lookback]
+    if not then > 0 or not math.isfinite(now):
+        return None
+    return now / then - 1
+
+
+def z_score_m7(closes, window):
+    if len(closes) < window + 1:
+        return None
+    win = closes[max(len(closes) - window - 1, 0):len(closes) - 1]
+    ms = mean_std_m7(win)
+    if ms is None or not ms["std"] > 0:
+        return None
+    return (closes[-1] - ms["mean"]) / ms["std"]
+
+
+def annualized_vol_is_null_m7(closes, window):
+    """annualizedVolM7(...) === null. Its value is never used by the action path."""
+    tail = closes[max(len(closes) - (window + 1), 0):]
+    for i in range(1, len(tail)):
+        if not tail[i - 1] > 0 or not tail[i] > 0:
+            return True
+    return len(tail) - 1 < 2
+
+
+def evaluate_action_m7(closes, p):
+    mom = period_return_m7(closes, p["momentumLookback"])
+    z = z_score_m7(closes, p["zWindow"])
+    if mom is None or z is None or annualized_vol_is_null_m7(closes, p["volWindow"]):
+        return "ABSTAIN"
+    if mom > 0 and z <= -p["zEntry"]:
+        return "ENTER_LONG"
+    if mom > 0 and abs(z) < p["zEntry"]:
+        return "ENTER_LONG"
+    if z >= 0 and mom <= 0:
+        return "EXIT_LONG"
+    return "HOLD"
+
+
+def _paper_fill_m7(book, side, price, notional_usd=None, qty=None):
+    if not price > 0:
+        raise JsThrow("fill requires observed price > 0")
+    cost_rate = (book["fee"] + book["slip"]) / 10_000
+    pos = book["positions"].get("ASSET") or {"qtyE9": 0, "costMicro": 0}
+    if side == "BUY":
+        if not notional_usd > 0:
+            raise JsThrow("BUY requires notionalUsd > 0")
+        n = to_micro(notional_usd)
+        if book["cash"] < n:
+            raise JsThrow("insufficient paper cash (no leverage in paper book)")
+        q = tdiv(n * QTY_B, to_micro(price * (1 + cost_rate)))
+        book["cash"] -= n
+        pos["qtyE9"] += q
+        pos["costMicro"] += n
+    else:
+        if not qty > 0:
+            raise JsThrow("SELL requires qtyE9 > 0")
+        if pos["qtyE9"] < qty:
+            raise JsThrow("insufficient paper position (no shorting in v1 paper book)")
+        book["cash"] += tdiv(qty * to_micro(price * (1 - cost_rate)), QTY_B)
+        pos["qtyE9"] -= qty
+        if pos["qtyE9"] == 0:
+            pos["costMicro"] = 0
+    book["positions"]["ASSET"] = pos
+
+
+def _equity_str_m7(book, price):
+    eq = book["cash"]
+    pos = book["positions"].get("ASSET")
+    if pos and pos["qtyE9"] != 0:
+        if not price > 0:
+            return None
+        eq += tdiv(pos["qtyE9"] * to_micro(price), QTY_B)
+    return micro_str(eq)
+
+
+def count_round_trips_m7(trades):
+    """(roundTrips, wins) over consecutive BUY/SELL pairs; a win needs exit price > entry price."""
+    wins = rts = 0
+    for k in range(0, len(trades) - 1, 2):
+        if trades[k][0] == "BUY" and trades[k + 1][0] == "SELL":
+            rts += 1
+            if trades[k + 1][1] > trades[k][1]:
+                wins += 1
+    return rts, wins
+
+
+def replay_series_m7(series, p, fee, slip, starting_cash):
+    if not starting_cash > 0:
+        raise JsThrow("startingCashUsd must be > 0")
+    book = {"cash": to_micro(starting_cash), "positions": {}, "fee": fee, "slip": slip}
+    closes_all = [r["close"] for r in series]
+    equity, trades, in_pos = [], [], False
+    warmup = max(p["momentumLookback"], p["zWindow"], p["volWindow"]) + 2
+    for i in range(warmup, len(series) - 1):
+        action = evaluate_action_m7(closes_all[:i + 1], p)
+        nxt = closes_all[i + 1]
+        if action == "ENTER_LONG" and not in_pos:
+            cash_usd = float(micro_str(book["cash"]))
+            notional = float(math.floor(cash_usd * p["positionFraction"] * 100)) / 100
+            if notional >= 10:
+                _paper_fill_m7(book, "BUY", nxt, notional_usd=notional)
+                in_pos = True
+                trades.append(("BUY", nxt))
+        elif action == "EXIT_LONG" and in_pos:
+            pos = book["positions"]["ASSET"]
+            if pos["qtyE9"] > 0:
+                _paper_fill_m7(book, "SELL", nxt, qty=pos["qtyE9"])
+                in_pos = False
+                trades.append(("SELL", nxt))
+        eq = _equity_str_m7(book, closes_all[i + 1])
+        if eq is not None:
+            equity.append(float(eq))
+    final = _equity_str_m7(book, closes_all[-1])
+    final_eq = float(final) if final is not None else None
+    rts, wins = count_round_trips_m7(trades)
+    mdd = None
+    if equity:
+        peak, mdd = float("-inf"), 0
+        for e in equity:
+            peak = max(peak, e)
+            if peak > 0:
+                mdd = max(mdd, (peak - e) / peak)
+    out = {"finalEquityUsd": final_eq, "totalReturn": None if final_eq is None else final_eq / starting_cash - 1,
+           "maxDrawdown": mdd, "nTrades": len(trades), "nRoundTrips": rts, "winRate": wins / rts if rts > 0 else None}
+    if rts < 10:
+        out["winRateNote"] = f"only {rts} round trips \u2014 win rate is statistically weak evidence"
+    out["openAtEnd"] = in_pos
+    return out
+
+
+def walk_forward_m7(series, grid, fee, slip, is_fraction, starting_cash):
+    split = math.floor(len(series) * is_fraction)
+    ins = series[:split]
+    outs = series[split - 60 if split - 60 >= 0 else 0:]
+    results = []
+    for params in grid:
+        p = {k: _m7_param(params, k, k in ("momentumLookback", "zWindow", "volWindow")) for k in
+             ("momentumLookback", "zWindow", "volWindow", "zEntry", "positionFraction")}
+        if min(p["momentumLookback"], p["zWindow"], p["volWindow"]) < 0:
+            raise _Unsupported("negative window parameter")
+        results.append({"params": params, "inSample": replay_series_m7(ins, p, fee, slip, starting_cash),
+                        "outOfSample": replay_series_m7(outs, p, fee, slip, starting_cash)})
+    return {"splitIndex": split, "inSampleBars": len(ins), "outOfSampleBars": len(series) - split, "populationSize": len(grid),
+            "cherryPickNote": "ALL configs reported (full population). Selecting the best cell after the fact is multiple testing \u2014 see METHODOLOGY.md.",
+            "results": results}
+
+
+def js_typeof(v):
+    if v is None:
+        return "null"
+    if v is UNDEF:
+        return "undefined"
+    if v is True or v is False:
+        return "boolean"
+    if is_number(v):
+        return "number"
+    if isinstance(v, str):
+        return "string"
+    return "object"
+
+
+def js_json_stringify(v):
+    """JSON.stringify(v) (insertion order, no spaces); None for undefined."""
+    if v is UNDEF:
+        return None
+    if v is None or v is True or v is False or is_number(v) or isinstance(v, str):
+        if is_number(v) and not math.isfinite(float(v)):
+            return "null"
+        return canonicalize(v)
+    if isinstance(v, list):
+        return "[" + ",".join(js_json_stringify(x) or "null" for x in v) + "]"
+    return "{" + ",".join(js_string_literal(k) + ":" + js_json_stringify(x) for k, x in js_entries(v) if x is not UNDEF) + "}"
+
+
+def diff_path_m7(a, b, path="$"):
+    """Twin of diffPathM7(): first divergence, for honest mismatch messages."""
+    ta, tb = js_typeof(a), js_typeof(b)
+    if ta == tb and ta in ("null", "undefined"):
+        return None
+    if ta == tb and ta in ("number", "string", "boolean") and a == b:
+        return None
+    if ta != tb:
+        sa, sb = js_json_stringify(a), js_json_stringify(b)
+        return f"{path} (recomputed {ta} {sa if sa is not None else js_to_string(a)} vs signed {tb} {sb if sb is not None else js_to_string(b)})"
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return f"{path}.length (recomputed {len(a)} vs signed {len(b)})"
+        for i, (x, y) in enumerate(zip(a, b)):
+            d = diff_path_m7(x, y, f"{path}[{i}]")
+            if d:
+                return d
+        return None
+    if ta == "object":
+        keys = []
+        for obj in (a, b):
+            for k, x in js_entries(obj):
+                if x is not UNDEF and k not in keys:
+                    keys.append(k)
+        for k in sorted(keys, key=utf16_key):
+            d = diff_path_m7(get(a, int(k) if isinstance(a, list) else k), get(b, int(k) if isinstance(b, list) else k), f"{path}.{k}")
+            if d:
+                return d
+        return None
+    return f"{path} (recomputed {js_json_stringify(a)} vs signed {js_json_stringify(b)})"
+
+
+def recompute_backtest(path, datasets_root):
+    """Twin of recomputeBacktest(). None for non-backtest receipts, else a result dict."""
+    try:
+        st = _statement_of(path)
+    except Exception:
+        return None
+    if get(st, "predicateType") != BACKTEST_PREDICATE_M7:
+        return None
+    summary = get(get(st, "predicate"), "summary")
+    if not truthy(summary):
+        return {"ok": False, "fails": ["backtest receipt missing predicate.summary"]}
+    archive = get(summary, "datasetArchive")
+    if not truthy(archive):
+        return {"ok": True, "skip": "pre-generation-7 receipt (no datasetArchive) \u2014 numbers cannot be recomputed; signature/doctrine checks only"}
+    pinned = js_to_string(coalesce(get(get(summary, "dataset"), "sha256"), ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", pinned):
+        return {"ok": False, "fails": ["dataset.sha256 is not 64 lowercase hex chars"]}
+    expect = f"data/datasets/{pinned}.json"
+    if get(archive, "path") != expect:
+        return {"ok": False, "fails": [f'datasetArchive.path "{js_to_string(get(archive, "path"))}" is not the canonical "{expect}" (anchored exact match required \u2014 no traversal, no aliases)']}
+    try:
+        with open(os.path.join(datasets_root, "data", "datasets", f"{pinned}.json"), "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return {"ok": False, "fails": [f"declared dataset archive MISSING at {expect} \u2014 a MEASURED claim whose inputs are gone does not re-verify (fail closed)"]}
+    if sha256_hex(data) != pinned:
+        return {"ok": False, "fails": [f"archived dataset bytes hash {sha256_hex(data)[:16]}\u2026 \u2260 pinned {pinned[:16]}\u2026 \u2014 dataset bytes TAMPERED or corrupted"]}
+    try:
+        series = json_loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {"ok": False, "fails": ["archived dataset is not valid JSON"]}
+    if not isinstance(series, list) or len(series) < 2 or not all(
+            truthy(r) and _js_finite(get(r, "tMs")) and _js_finite(get(r, "close")) and get(r, "close") > 0 for r in series):
+        return {"ok": False, "fails": ["archived dataset rows invalid \u2014 need [{tMs, close>0}, \u2026]"]}
+    fails = []
+    n = get(get(summary, "dataset"), "n")
+    if not (is_number(n) and n == len(series)):
+        fails.append(f"dataset.n {js_to_string(n)} \u2260 archived row count {len(series)}")
+    method = coalesce(get(summary, "method"), {})
+    replay = coalesce(get(method, "replay"), {})
+    cm = coalesce(get(method, "costModel"), {})
+    grid = get(method, "grid")
+    if not isinstance(grid, list) or not grid:
+        fails.append("method.grid missing/empty \u2014 cannot recompute")
+    isf, cash = get(replay, "isFraction"), get(replay, "startingCashUsd")
+    if not _js_finite(isf) or not (0 < isf < 1):
+        fails.append("method.replay.isFraction missing/invalid \u2014 replay contract incomplete")
+    if not _js_finite(cash) or not cash > 0:
+        fails.append("method.replay.startingCashUsd missing/invalid \u2014 replay contract incomplete")
+    if not _js_finite(get(cm, "feeBps")) or not _js_finite(get(cm, "slippageBps")):
+        fails.append("method.costModel missing finite feeBps/slippageBps")
+    version = get(replay, "version")
+    if version is not UNDEF and not (is_number(version) and version in (7, 8)):
+        fails.append("unsupported replay version")
+    if fails:
+        return {"ok": False, "fails": fails}
+    if is_number(version) and version == 8:
+        return {"ok": True, "not_assessed": "generation-8 replay is not implemented in the Python twin; run verify.mjs"}
+    rows = [{"close": float(get(r, "close"))} for r in series]
+    try:
+        recomputed = walk_forward_m7(rows, grid, float(get(cm, "feeBps")), float(get(cm, "slippageBps")), float(isf), float(cash))
+    except JsThrow as exc:
+        return {"ok": False, "fails": [f"replay threw: {exc}"]}
+    except _Unsupported as exc:
+        return {"ok": True, "not_assessed": f"outside what the Python twin mirrors ({exc}); run verify.mjs"}
+    signed = coalesce(get(summary, "walkForward"), None)
+    if canonicalize(recomputed) != canonicalize(signed):
+        where = diff_path_m7(recomputed, signed)
+        return {"ok": False, "fails": [f"RECOMPUTE MISMATCH at {where} \u2014 the signed numbers do NOT re-derive from the archived dataset (a valid signature cannot rescue false numbers)"]}
+    return {"ok": True, "recomputed": True, "cells": len(grid), "bars": len(series)}
+
+
 # -------------------------------------------------------------------- refusals
 REFUSALS_RE = re.compile(r"refusals_[0-9]+\.receipt\.json")
 
@@ -1062,6 +1367,7 @@ USAGE = ("usage: python verify/verify.py [--pubkey keys/engine_pubkey.json] "
 def main(argv=None, out=print):
     args = list(sys.argv[1:] if argv is None else argv)
     pinned, chain_dir, book_dir, refusals_dir, files, unsupported = None, None, None, None, [], []
+    datasets_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     i = 0
     try:
         while i < len(args):
@@ -1085,7 +1391,10 @@ def main(argv=None, out=print):
             elif a == "--refusals":
                 i += 1
                 refusals_dir = args[i]
-            elif a in ("--witness", "--rekor-pubkey", "--tsa-anchors", "--observer-pubkey", "--datasets-root"):
+            elif a == "--datasets-root":
+                i += 1
+                datasets_root = args[i]
+            elif a in ("--witness", "--rekor-pubkey", "--tsa-anchors", "--observer-pubkey"):
                 unsupported.append(a)
                 i += 1
             else:
@@ -1103,7 +1412,8 @@ def main(argv=None, out=print):
     if not files and not chain_dir and not book_dir and not refusals_dir:
         print(USAGE, file=sys.stderr)
         return 2
-    all_ok, not_assessed = True, 0
+    all_ok = True
+    stats = {"recomputed": 0, "skipped": 0, "failed": 0, "not_assessed": 0}
     for f in sorted(files, key=utf16_key):
         r = verify_file(f, pinned)
         all_ok = all_ok and r["ok"]
@@ -1112,13 +1422,30 @@ def main(argv=None, out=print):
             out(f"      note: {n}")
         for x in r.get("fails", []):
             out(f"      FAIL: {x}")
-        if r["ok"] and needs_recompute(f):
-            not_assessed += 1
-            out("      recompute: NOT ASSESSED \u2014 Python twin covers receipt and chain checks only; run verify.mjs for generation-7 recompute")
+        if r["ok"]:
+            rr = recompute_backtest(f, datasets_root)
+            if rr is None:
+                continue
+            if rr["ok"] and rr.get("recomputed"):
+                stats["recomputed"] += 1
+                out(f"      recompute: OK \u2014 {rr['cells']} grid cell(s) re-derived bit-exact from {rr['bars']} archived bars (MEASURED, recomputed)")
+            elif rr["ok"] and rr.get("skip"):
+                stats["skipped"] += 1
+                out(f"      recompute: SKIP \u2014 {rr['skip']}")
+            elif rr["ok"]:
+                stats["not_assessed"] += 1
+                out(f"      recompute: NOT ASSESSED \u2014 {rr['not_assessed']}")
+            else:
+                stats["failed"] += 1
+                all_ok = False
+                for x in rr["fails"]:
+                    out(f"      RECOMPUTE FAIL: {x}")
     if files:
         out(f"\nAll {len(files)} receipt(s) verified." if all_ok else "\nVERIFICATION FAILED")
-    if not_assessed:
-        out(f"Recompute: {not_assessed} backtest receipt(s) NOT ASSESSED by the Python twin.")
+    if stats["recomputed"] + stats["skipped"] + stats["failed"] > 0:
+        out(f"Recompute (generation 7): {stats['recomputed']} backtest receipt(s) re-derived bit-exact, {stats['skipped']} skipped (pre-gen7), {stats['failed']} FAILED.")
+    if stats["not_assessed"]:
+        out(f"Recompute: {stats['not_assessed']} backtest receipt(s) NOT ASSESSED by the Python twin (verify.mjs is authoritative for them).")
     if chain_dir:
         all_ok = verify_chain(chain_dir, pinned, out) and all_ok
     if book_dir:
