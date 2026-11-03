@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parity tests: verify/verify.py against verify/verify.mjs (stdlib unittest).
 
-Covers the receipt, chain and refusal checks.
+Covers the receipt, chain, book, refusal and generation-7 recompute checks.
 
 Run from the repo root:
     python -m unittest discover -s test -p "test_verify_py.py" -v
@@ -20,6 +20,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import random
 import shutil
@@ -320,10 +321,10 @@ class ReceiptTests(unittest.TestCase):
             if needle:
                 self.assertTrue(any(needle in f for f in r["fails"]), (name, r["fails"]))
 
-    def test_backtest_receipt_is_reported_not_assessed(self):
+    def test_backtest_receipt_without_archive_is_skipped(self):
         code, out = run_py(["--pubkey", str(self.pin), str(self.rdir / "backtest_predicate.json")])
         self.assertEqual(code, 0)
-        self.assertIn("recompute: NOT ASSESSED", out)
+        self.assertIn("recompute: SKIP \u2014 pre-generation-7 receipt (no datasetArchive)", out)
 
     @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
     def test_identical_report_to_verify_mjs_pinned_and_unpinned(self):
@@ -629,10 +630,494 @@ class PublishedRefusalsTests(unittest.TestCase):
                          ([l.strip() for l in jout.splitlines() if "REFUSALS" in l], jcode))
 
 
+# ------------------------------------------------------------- book parity
+BOOK_CONFIG = {"costModel": {"feeBps": 10, "slippageBps": 10}, "entryFractionBps": 1000, "startingCashUsd": 10000}
+
+
+def book_signal(symbol, action, verdict, price, at="2026-02-01T00:00:00.000Z"):
+    dec = {"asset": {"symbol": symbol}, "proposedAction": action, "verdict": verdict,
+           "snapshot": {"priceUsd": price, "observedAtIso": at},
+           "gates": [{"gate": "G1", "verdict": "BLOCKED", "reason": "fixture"}] if verdict == "BLOCKED" else [{"gate": "G1", "verdict": "ALLOWED"}]}
+    return statement(dec)
+
+
+def build_book_ledger(root, key, runs, config=BOOK_CONFIG, edits=None, pre=0, names=None, tamper=()):
+    """runs: [(signals, booked)] where signals = [(symbol, action, verdict, price)].
+
+    Book bodies are produced by the twin's own replay; the parity tests then
+    require verify.mjs to accept and reject exactly the same ledgers, and the
+    hand-checked test pins the arithmetic independently of either verifier.
+    """
+    edits = edits or {}
+    names = names or [f"202602{i + 1:02d}T000000Z_run{i + 1}" for i in range(pre + len(runs))]
+    for n in names[:pre]:
+        (root / n).mkdir(parents=True)
+        (root / n / "session_1.receipt.json").write_text("{}", encoding="utf-8")
+    prev_link, prev_state, seq, last_booked = None, None, 0, None
+    for idx, (signals, booked) in enumerate(runs):
+        d = names[pre + idx]
+        (root / d).mkdir(parents=True)
+        for sym, action, verdict, price, *suffix in signals:
+            env = key.envelope(payload_of(book_signal(sym, action, verdict, price)))
+            fname = f"signal_{sym}_{suffix[0] if suffix else 1}.receipt.json"
+            if (idx, fname) in tamper:
+                sig = bytearray(base64.b64decode(env["signatures"][0]["sig"]))
+                sig[1] ^= 1
+                env["signatures"][0]["sig"] = base64.b64encode(bytes(sig)).decode()
+            (root / d / fname).write_text(json.dumps(env), encoding="utf-8")
+        if not booked:
+            continue
+        seq += 1
+        decisions, excluded = [], []
+        for n in sorted((p.name for p in (root / d).iterdir() if p.name.startswith("signal_")), key=vpy.utf16_key):
+            if not vpy.verify_file(str(root / d / n), key.spki)["ok"]:
+                excluded.append(n)
+                continue
+            dec = vpy.book_decision_mirror(n, vpy._statement_of(str(root / d / n)))
+            if dec:
+                decisions.append(dec)
+        if seq == 1:
+            start = {"cashMicro": vpy.to_micro(config["startingCashUsd"]), "positions": {}}
+        else:
+            start = {"cashMicro": int(prev_state["cashMicro"]),
+                     "positions": {a: {"qtyE9": int(p["qtyE9"]), "costMicro": int(p["costMicro"])} for a, p in prev_state["positions"].items()}}
+        gen = f"2026-02-{pre + idx + 1:02d}T00:05:00.000Z"
+        rep = vpy.replay_transition(start, config, decisions, gen)
+        body = {"kind": "szl-quant-book", "v": 1, "seq": seq, "prev": prev_link, "runDir": d, "config": config, "generatedAtIso": gen,
+                "inputs": {"signalFiles": sorted((x["file"] for x in rep["sortedDecisions"]), key=vpy.utf16_key),
+                           "decisions": [{k: x[k] for k in ("file", "symbol", "proposedAction", "verdict", "priceUsd", "observedAtIso")} for x in rep["sortedDecisions"]],
+                           "excludedSignals": {"count": len(excluded), "files": excluded}},
+                "fills": rep["fills"], "noActions": rep["noActions"], "state": rep["state"], "mark": rep["mark"]}
+        if seq == 1:
+            body["preBookRunDirs"] = [n for n in sorted(names) if n < d]
+        else:
+            body["skippedRunDirs"] = [n for n in sorted(names) if last_booked < n < d]
+        body = json.loads(json.dumps(body))  # edits must not leak into the generator's own state
+        if seq in edits:
+            edits[seq](body)
+        name = f"book_{seq}.receipt.json"
+        raw = json.dumps(key.envelope(payload_of(statement(summary=body, predicate_type="https://szl.holdings/quant/book/v1")))).encode()
+        (root / d / name).write_bytes(raw)
+        prev_link = {"file": name, "runDir": d, "sha256": hashlib.sha256(raw).hexdigest()}
+        prev_state, last_booked = rep["state"], d
+    return names
+
+
+TRADE_RUNS = [([("SOL", "ENTER_LONG", "ALLOWED", 100), ("JUP", "HOLD", "ALLOWED", 1.5), ("Bonk", "ENTER_LONG", "BLOCKED", 0.00002)], True),
+              ([("SOL", "EXIT_LONG", "ALLOWED", 110), ("JUP", "EXIT_LONG", "ALLOWED", 1.5)], True)]
+
+
+def _summary(path):
+    return json.loads(base64.b64decode(json.loads(Path(path).read_text(encoding="utf-8"))["payload"]))["predicate"]["summary"]
+
+
+class JsNumberPrimitiveTests(unittest.TestCase):
+    """Node-independent anchors: ECMAScript toFixed ties and BigInt truncation."""
+
+    def test_to_fixed_matches_ecmascript_on_known_values(self):
+        cases = [((0.25, 1), "0.3"), ((2.5, 0), "3"), ((0.0078125, 6), "0.007813"), ((-0.0078125, 6), "-0.007813"),
+                 ((1.005, 2), "1.00"), ((-1e-7, 6), "-0.000000"), ((-0.0, 2), "0.00"), ((1e21, 2), "1e+21"), ((100.2, 10), "100.2000000000")]
+        for (x, f), want in cases:
+            self.assertEqual(vpy.js_to_fixed(x, f), want, (x, f))
+
+    def test_bigint_division_truncates_toward_zero(self):
+        self.assertEqual([vpy.tdiv(7, 2), vpy.tdiv(-7, 2), vpy.tdiv(7, -2), vpy.tdiv(-7, -2)], [3, -3, -3, 3])
+        with self.assertRaises(vpy.JsThrow):
+            vpy.tdiv(1, 0)
+
+    def test_to_micro_and_bigint_errors(self):
+        self.assertEqual((vpy.to_micro(0.0078125), vpy.to_micro(-2.5), vpy.to_micro(10000)), (7813, -2500000, 10_000_000_000))
+        for bad in ("5", True, None, float("inf")):
+            with self.assertRaises(vpy.JsThrow):
+                vpy.to_micro(bad)
+        with self.assertRaisesRegex(vpy.JsThrow, "The number 25.5 cannot be converted to a BigInt because it is not an integer"):
+            vpy.js_bigint(25.5)
+        self.assertEqual((vpy.js_bigint(" 12 "), vpy.js_bigint(""), vpy.js_bigint("0x10"), vpy.js_bigint("-5")), (12, 0, 16, -5))
+
+
+@unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+class ToFixedParityTests(unittest.TestCase):
+    def test_fuzzed_to_fixed_matches_node(self):
+        rng = random.Random(7)
+        vals = [k / 2 ** m for k in range(-40, 41) for m in range(0, 12)]
+        vals += [struct.unpack("<d", rng.getrandbits(64).to_bytes(8, "little"))[0] for _ in range(400)]
+        vals += [rng.uniform(-1e6, 1e6) for _ in range(400)] + [0.1, 0.7, 1.005, 2.675, 1e20, 9.5e20, -0.0]
+        vals = [v for v in vals if v == v and abs(v) != float("inf")]
+        cases = [(v, f) for v in vals for f in (0, 1, 2, 6, 10)]
+        script = "const c=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(JSON.stringify(c.map(([b,f])=>{const v=new Float64Array(new Uint8Array(Buffer.from(b,'hex')).buffer)[0];return v.toFixed(f);})))"
+        payload = json.dumps([[struct.pack("<d", v).hex(), f] for v, f in cases])
+        p = subprocess.run([NODE, "-e", script], input=payload, capture_output=True, text=True, timeout=120, check=True)
+        js = json.loads(p.stdout)
+        bad = [(v, f, vpy.js_to_fixed(v, f), j) for (v, f), j in zip(cases, js) if vpy.js_to_fixed(v, f) != j]
+        self.assertEqual(bad[:3], [], f"{len(bad)} of {len(cases)} differ")
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class BookTests(unittest.TestCase):
+    def setUp(self):
+        self.key = Key()
+        self.base = tmpdir(self)
+        self.pin = self.base / "pin.json"
+        self.key.pin(self.pin)
+
+    def ledger(self, runs=TRADE_RUNS, **kw):
+        root = self.base / f"b{len(os.listdir(self.base))}"
+        names = build_book_ledger(root, self.key, runs, **kw)
+        return root, names
+
+    def test_hand_checked_round_trip(self):
+        """10,000 USD, 10% entry, 20 bps cost: buy SOL at 100, sell at 110 (numbers worked by hand)."""
+        root, names = self.ledger()
+        b1, b2 = _summary(root / names[0] / "book_1.receipt.json"), _summary(root / names[1] / "book_2.receipt.json")
+        f = b1["fills"][0]
+        self.assertEqual((f["side"], f["notionalUsd"], f["effectivePrice"], f["qtyE9"], f["modeledCostUsd"]),
+                         ("BUY", "1000.000000", "100.2000000000", "9980039920", "1.996008"))
+        self.assertEqual(b1["state"], {"cashMicro": "9000000000", "positions": {"SOL": {"qtyE9": "9980039920", "costMicro": "1000000000"}}})
+        self.assertEqual((b1["mark"]["equityUsd"], b1["mark"]["positions"][0]["valueUsd"]), ("9998.003992", "998.003992"))
+        self.assertEqual([x["why"] for x in b1["noActions"]], ["decision BLOCKED \u2014 fail closed, the gates hold the book", "HOLD \u2014 no book action"])
+        s = b2["fills"][0]
+        self.assertEqual((s["side"], s["notionalUsd"], s["effectivePrice"], s["modeledCostUsd"]), ("SELL", "1095.608782", "109.7800000000", "2.195609"))
+        self.assertEqual((b2["state"], b2["mark"]["equityUsd"]), ({"cashMicro": "10095608782", "positions": {}}, "10095.608782"))
+        self.assertEqual(b2["noActions"], [{"asset": "JUP", "action": "NONE", "why": "no open position to exit"}])
+        lines = []
+        self.assertTrue(vpy.verify_book(str(root), self.key.spki, out=lines.append), lines)
+        self.assertEqual(lines[0], "BOOK OK  links=2  head=seq 2  equity=$10095.608782 [MODELED]  open=0  cash=$10095.608782")
+
+    def test_tie_price_uses_ecmascript_rounding(self):
+        root, names = self.ledger(runs=[([("PYTH", "ENTER_LONG", "ALLOWED", 0.0078125)], True)])
+        f = _summary(root / names[0] / "book_1.receipt.json")["fills"][0]
+        self.assertEqual(f["qtyE9"], str(1_000_000_000 * 1_000_000_000 // vpy.to_micro(0.0078125 * 1.002)))
+        self.assertEqual(vpy.to_micro(0.0078125), 7813)  # Python's own round-half-even would give 7812
+        self.assertEqual(f["modeledCostUsd"], vpy.micro_str(((1_000_000_000 * 1_000_000_000 // 7813) - int(f["qtyE9"])) * 7813 // 1_000_000_000))
+
+    def test_hand_checked_fail_closed_branches(self):
+        sc = self.scenarios()
+        root, names = self.ledger(**sc["unpriced_open_position"][0])
+        b2 = _summary(root / names[1] / "book_2.receipt.json")
+        self.assertEqual(b2["fills"], [])
+        self.assertIn({"asset": "JUP", "action": "NONE", "why": "an open position is unpriced \u2014 equity not computable, no new entries (fail closed)"}, b2["noActions"])
+        self.assertEqual((b2["mark"]["equityUsd"], b2["mark"]["equityNote"]), (None, "1 position(s) unpriced \u2014 equity not computable (honest empty)"))
+        self.assertEqual(b2["mark"]["positions"], [{"asset": "SOL", "qtyE9": "9980039920", "value": {"label": "UNAVAILABLE", "note": "no observed price at mark time"}}])
+        root, names = self.ledger(**sc["insufficient_cash"][0])
+        b1 = _summary(root / names[0] / "book_1.receipt.json")
+        self.assertEqual([f["asset"] for f in b1["fills"]], ["A1", "B2"])
+        skips = [x for x in b1["noActions"] if x["action"] == "SKIPPED_INSUFFICIENT_CASH"]
+        self.assertEqual(len(skips), 10)
+        self.assertTrue(skips[0]["why"].startswith("entry needs ") and skips[0]["why"].endswith(" \u2014 no leverage, honest skip"))
+        root, names = self.ledger(**sc["already_long_and_no_price"][0])
+        b1, b2 = (_summary(root / n / f"book_{i}.receipt.json") for i, n in enumerate(names, 1))
+        self.assertEqual(b1["noActions"], [{"asset": "JUP", "action": "NONE", "why": "no observed price \u2014 cannot fill honestly (fail closed)"}])
+        self.assertEqual(sorted(x["why"] for x in b2["noActions"]), ["already long \u2014 no pyramiding in v1", "no open position to exit"])
+
+    def test_unverified_signal_is_excluded_not_booked(self):
+        runs = [([("SOL", "ENTER_LONG", "ALLOWED", 100), ("JUP", "ENTER_LONG", "ALLOWED", 2)], True)]
+        root, names = self.ledger(runs=runs, tamper={(0, "signal_JUP_1.receipt.json")})
+        b1 = _summary(root / names[0] / "book_1.receipt.json")
+        self.assertEqual(b1["inputs"]["excludedSignals"], {"count": 1, "files": ["signal_JUP_1.receipt.json"]})
+        self.assertEqual([f["asset"] for f in b1["fills"]], ["SOL"])
+        lines = []
+        self.assertTrue(vpy.verify_book(str(root), self.key.spki, out=lines.append), lines)
+
+    def test_book_seq_must_follow_run_dir_order(self):
+        names = ["20260202T000000Z_run2", "20260201T000000Z_run1"]
+        root, _ = self.ledger(runs=TRADE_RUNS, names=names)
+        lines = []
+        self.assertFalse(vpy.verify_book(str(root), self.key.spki, out=lines.append))
+        self.assertTrue(any("run dir 20260201T000000Z_run1 not after 20260202T000000Z_run2" in l for l in lines), lines)
+
+    def test_exit_then_reentry_resets_cost_basis(self):
+        runs = [([("SOL", "ENTER_LONG", "ALLOWED", 100)], True),
+                ([("SOL", "EXIT_LONG", "ALLOWED", 110, "1"), ("SOL", "ENTER_LONG", "ALLOWED", 110, "2")], True)]
+        root, names = self.ledger(runs=runs)
+        b2 = _summary(root / names[1] / "book_2.receipt.json")
+        self.assertEqual([f["side"] for f in b2["fills"]], ["SELL", "BUY"])
+        self.assertEqual(b2["state"]["positions"]["SOL"]["costMicro"], str(vpy.to_micro(float(b2["fills"][1]["notionalUsd"]))))
+
+    def test_undeclared_run_dir_before_genesis_is_refused(self):
+        root, names = self.ledger()
+        early = root / "20260100T000000Z_run0"
+        early.mkdir()
+        lines = []
+        self.assertFalse(vpy.verify_book(str(root), self.key.spki, out=lines.append))
+        self.assertTrue(any("preBookRunDirs do not match" in l for l in lines), lines)
+
+    def scenarios(self):
+        def lie(field, fn):
+            return {"edits": {1: lambda b: fn(b[field])}}
+        frac = dict(BOOK_CONFIG, entryFractionBps=25.5)
+        return {
+            "trade_round_trip": ({}, True),
+            "tie_price": ({"runs": [([("PYTH", "ENTER_LONG", "ALLOWED", 0.0078125)], True)]}, True),
+            "unpriced_open_position": ({"runs": [([("SOL", "ENTER_LONG", "ALLOWED", 100)], True), ([("SOL", "HOLD", "ALLOWED", None), ("JUP", "ENTER_LONG", "ALLOWED", 2)], True)]}, True),
+            "insufficient_cash": ({"runs": [([(s, "ENTER_LONG", "ALLOWED", 1 + i) for i, s in enumerate(["A1", "B2", "C3", "D4", "E5", "F6", "G7", "H8", "I9", "J10", "K11", "L12"])], True)],
+                                   "config": dict(BOOK_CONFIG, entryFractionBps=5000)}, True),
+            "already_long_and_no_price": ({"runs": [([("SOL", "ENTER_LONG", "ALLOWED", 100), ("JUP", "ENTER_LONG", "ALLOWED", None)], True),
+                                                    ([("SOL", "ENTER_LONG", "ALLOWED", 101), ("JUP", "EXIT_LONG", "ALLOWED", 2)], True)]}, True),
+            "skipped_run_declared": ({"runs": [TRADE_RUNS[0], ([("SOL", "HOLD", "ALLOWED", 105)], False), TRADE_RUNS[1]]}, True),
+            "pre_book_dirs": ({"pre": 2}, True),
+            "fills_lie": (lie("fills", lambda f: f[0].__setitem__("qtyE9", "9980039921")), False),
+            "state_lie": (lie("state", lambda s: s.__setitem__("cashMicro", "9000000001")), False),
+            "mark_lie": (lie("mark", lambda m: m.__setitem__("equityUsd", "9999.000000")), False),
+            "noactions_lie": (lie("noActions", lambda n: n.pop()), False),
+            "inputs_lie": (lie("inputs", lambda i: i["decisions"][0].__setitem__("priceUsd", 99)), False),
+            "config_drift": ({"edits": {2: lambda b: b.__setitem__("config", dict(BOOK_CONFIG, entryFractionBps=999))}}, False),
+            "skipped_lie": ({"runs": [TRADE_RUNS[0], ([("SOL", "HOLD", "ALLOWED", 105)], False), TRADE_RUNS[1]], "edits": {2: lambda b: b.__setitem__("skippedRunDirs", [])}}, False),
+            "prebook_lie": ({"pre": 1, "edits": {1: lambda b: b.__setitem__("preBookRunDirs", [])}}, False),
+            "wrong_rundir": ({"edits": {2: lambda b: b.__setitem__("runDir", "elsewhere")}}, False),
+            "prev_lie": ({"edits": {2: lambda b: b["prev"].__setitem__("sha256", "0" * 64)}}, False),
+            "seq_gap": ({"edits": {2: lambda b: b.__setitem__("seq", 3)}}, False),
+            "fractional_entry_bps": ({"config": frac}, False),
+            "incomplete_config": ({"config": {"costModel": {"feeBps": 10}, "entryFractionBps": 1000, "startingCashUsd": 10000}}, False),
+        }
+
+    def _build(self, kw):
+        kw = dict(kw)
+        if kw.get("config", BOOK_CONFIG)["entryFractionBps"] == 25.5 or "slippageBps" not in kw.get("config", BOOK_CONFIG)["costModel"]:
+            cfg = kw.pop("config")
+            root, names = self.ledger(**kw)
+            for n in names:
+                for p in (root / n).glob("book_*.receipt.json"):
+                    p.unlink()
+            # re-emit unreplayable books directly: the generator itself cannot replay this config
+            prev = None
+            for seq, n in enumerate([x for x in names], 1):
+                body = {"kind": "szl-quant-book", "v": 1, "seq": seq, "prev": prev, "runDir": n, "config": cfg, "generatedAtIso": "x",
+                        "inputs": {}, "fills": [], "noActions": [], "state": {"cashMicro": "0", "positions": {}}, "mark": {}}
+                if seq == 1:
+                    body["preBookRunDirs"] = []
+                else:
+                    body["skippedRunDirs"] = []
+                raw = json.dumps(self.key.envelope(payload_of(statement(summary=body, predicate_type="https://szl.holdings/quant/book/v1")))).encode()
+                (root / n / f"book_{seq}.receipt.json").write_bytes(raw)
+                prev = {"file": f"book_{seq}.receipt.json", "runDir": n, "sha256": hashlib.sha256(raw).hexdigest()}
+            return root
+        return self.ledger(**kw)[0]
+
+    def test_python_book_verdicts(self):
+        for name, (kw, want) in self.scenarios().items():
+            root = self._build(kw)
+            lines = []
+            self.assertEqual(vpy.verify_book(str(root), self.key.spki, out=lines.append), want, (name, lines))
+
+    def test_fractional_entry_bps_is_a_replay_error_with_v8_message(self):
+        root = self._build(self.scenarios()["fractional_entry_bps"][0])
+        lines = []
+        self.assertFalse(vpy.verify_book(str(root), self.key.spki, out=lines.append))
+        self.assertTrue(any("replay threw \u2014 The number 25.5 cannot be converted to a BigInt because it is not an integer" in l for l in lines), lines)
+
+    def test_malformed_previous_state_aborts_like_verify_mjs(self):
+        root, _ = self.ledger(edits={1: lambda b: b["state"].__setitem__("cashMicro", "abc")})
+        code, out = run_py(["--pubkey", str(self.pin), "--book", str(root)])
+        self.assertEqual((code, [l for l in out.splitlines() if "BOOK" in l]), (1, []))
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_identical_book_report_to_verify_mjs(self):
+        for name, (kw, _) in self.scenarios().items():
+            root = self._build(kw)
+            jcode, jout = run_node(["--pubkey", str(self.pin), "--book", str(root)])
+            pcode, pout = run_py(["--pubkey", str(self.pin), "--book", str(root)])
+            jl = [l.strip() for l in jout.splitlines() if "BOOK" in l]
+            pl = [l.strip() for l in pout.splitlines() if "BOOK" in l]
+            self.assertEqual((pl, pcode), (jl, jcode), name)
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_malformed_previous_state_exit_code_matches_verify_mjs(self):
+        root, _ = self.ledger(edits={1: lambda b: b["state"].__setitem__("cashMicro", "abc")})
+        jcode, jout = run_node(["--pubkey", str(self.pin), "--book", str(root)])
+        self.assertEqual((jcode, [l for l in jout.splitlines() if "BOOK" in l]), (1, []))
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class PublishedBookTests(unittest.TestCase):
+    def test_mid_chain_run_dir_alone_aborts_like_verify_mjs(self):
+        """The fixture is one mid-chain run dir (book seq 8): there is no previous link to
+        replay from, so verify.mjs throws reading links[-1].body and exits 1; so does the twin."""
+        with self.assertRaises(TypeError):
+            vpy.verify_book(str(FIXTURES), vpy.load_pin(str(ENGINE_PIN)), out=lambda _l: None)
+        code, out = run_py(["--pubkey", str(ENGINE_PIN), "--book", str(FIXTURES)])
+        self.assertEqual((code, [l for l in out.splitlines() if "BOOK" in l]), (1, []))
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_published_book_report_matches_verify_mjs(self):
+        args = ["--pubkey", str(ENGINE_PIN), "--book", str(FIXTURES)]
+        jcode, jout = run_node(args)
+        pcode, pout = run_py(args)
+        self.assertEqual(([l.strip() for l in pout.splitlines() if "BOOK" in l], pcode),
+                         ([l.strip() for l in jout.splitlines() if "BOOK" in l], jcode))
+
+
+# ------------------------------------------------- generation-7 recompute
+RECEIPTS = REPO / "receipts"
+BACKTESTS = sorted(RECEIPTS.glob("backtest_*.receipt.json"))
+
+
+def recompute_lines(text):
+    return [l.strip() for l in text.splitlines() if "ecompute" in l or l.startswith(("PASS", "FAIL", "All ", "VERIFICATION"))]
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class PublishedRecomputeTests(unittest.TestCase):
+    def test_every_committed_backtest_recomputes_bit_exact(self):
+        self.assertEqual(len(BACKTESTS), 4)
+        pinned = vpy.load_pin(str(ENGINE_PIN))
+        for p in BACKTESTS:
+            self.assertTrue(vpy.verify_file(str(p), pinned)["ok"], p.name)
+            self.assertEqual(vpy.recompute_backtest(str(p), str(REPO)), {"ok": True, "recomputed": True, "cells": 5, "bars": 366}, p.name)
+
+    def test_cli_reports_recompute_for_committed_receipts(self):
+        code, out = run_py(["--pubkey", str(ENGINE_PIN), "--dir", str(RECEIPTS)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Recompute (generation 7): 4 backtest receipt(s) re-derived bit-exact, 0 skipped (pre-gen7), 0 FAILED.", out)
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_committed_receipts_report_matches_verify_mjs(self):
+        args = ["--pubkey", str(ENGINE_PIN), "--dir", str(RECEIPTS)]
+        jcode, jout = run_node(args)
+        pcode, pout = run_py(args)
+        self.assertEqual((recompute_lines(pout), pcode), (recompute_lines(jout), jcode))
+
+
+@unittest.skipUnless(HAVE_CRYPTO, "cryptography is required for signature tests")
+class RecomputeTamperTests(unittest.TestCase):
+    """Re-signed copies of a real receipt (test key) and copies of its real dataset."""
+
+    def setUp(self):
+        self.key = Key()
+        self.root = tmpdir(self)
+        (self.root / "data" / "datasets").mkdir(parents=True)
+        (self.root / "receipts").mkdir()
+        self.pin = self.root / "pin.json"
+        self.key.pin(self.pin)
+        src = BACKTESTS[-1]
+        self.statement = json.loads(base64.b64decode(json.loads(src.read_text(encoding="utf-8"))["payload"]))
+        self.sha = self.statement["predicate"]["summary"]["dataset"]["sha256"]
+        shutil.copy(REPO / "data" / "datasets" / f"{self.sha}.json", self.root / "data" / "datasets" / f"{self.sha}.json")
+
+    def receipt(self, name, edit=None):
+        st = json.loads(json.dumps(self.statement))
+        if edit:
+            edit(st["predicate"]["summary"])
+        dec = st["predicate"]["summary"]
+        st["subject"] = [{"name": "fixture", "digest": {"sha256": hashlib.sha256(vpy.canonicalize(dec).encode()).hexdigest()}}]
+        p = self.root / "receipts" / f"{name}.json"
+        p.write_text(json.dumps(self.key.envelope(payload_of(st))), encoding="utf-8")
+        return p
+
+    def recompute(self, p):
+        return vpy.recompute_backtest(str(p), str(self.root))
+
+    def cases(self):
+        r0 = lambda s: s["walkForward"]["results"][0]  # noqa: E731
+        return {
+            "clean": (None, "recomputed"),
+            "equity_lie": (lambda s: r0(s)["inSample"].__setitem__("finalEquityUsd", r0(s)["inSample"]["finalEquityUsd"] + 0.000001), "RECOMPUTE MISMATCH at $.results[0].inSample.finalEquityUsd"),
+            "drawdown_lie": (lambda s: r0(s)["outOfSample"].__setitem__("maxDrawdown", 0.01), "RECOMPUTE MISMATCH at $.results[0].outOfSample.maxDrawdown"),
+            "trade_count_lie": (lambda s: r0(s)["inSample"].__setitem__("nTrades", r0(s)["inSample"]["nTrades"] + 2), "RECOMPUTE MISMATCH at $.results[0].inSample.nTrades"),
+            "dropped_cell": (lambda s: s["walkForward"]["results"].pop(), "RECOMPUTE MISMATCH at $.results.length"),
+            "grid_edit": (lambda s: s["method"]["grid"][1].__setitem__("zEntry", 2), "RECOMPUTE MISMATCH at $.results[1]"),
+            "cost_edit": (lambda s: s["method"]["costModel"].__setitem__("feeBps", 31), "RECOMPUTE MISMATCH at $.results[0]"),
+            "split_edit": (lambda s: s["method"]["replay"].__setitem__("isFraction", 0.71), "RECOMPUTE MISMATCH at $"),
+            "type_change": (lambda s: r0(s)["inSample"].__setitem__("winRate", "0.6"), "(recomputed number "),
+            "n_wrong": (lambda s: s["dataset"].__setitem__("n", 365), "dataset.n 365 \u2260 archived row count 366"),
+            "path_traversal": (lambda s: s["datasetArchive"].__setitem__("path", "data/datasets/../x.json"), "is not the canonical"),
+            "bad_sha": (lambda s: s["dataset"].__setitem__("sha256", "ABC"), "dataset.sha256 is not 64 lowercase hex chars"),
+            "missing_dataset": (lambda s: s["dataset"].__setitem__("sha256", "0" * 64) or s["datasetArchive"].__setitem__("path", f"data/datasets/{'0' * 64}.json"), "declared dataset archive MISSING"),
+            "bad_fraction": (lambda s: s["method"]["replay"].__setitem__("isFraction", 1), "method.replay.isFraction missing/invalid"),
+            "no_grid": (lambda s: s["method"].__setitem__("grid", []), "method.grid missing/empty"),
+            "version_9": (lambda s: s["method"]["replay"].__setitem__("version", 9), "unsupported replay version"),
+            "version_8": (lambda s: s["method"]["replay"].__setitem__("version", 8), "not_assessed"),
+            "fractional_window": (lambda s: s["method"]["grid"][0].__setitem__("zWindow", 20.5), "not_assessed"),
+            "no_archive": (lambda s: s.pop("datasetArchive"), "skip"),
+        }
+
+    def test_each_case(self):
+        for name, (edit, want) in self.cases().items():
+            r = self.recompute(self.receipt(name, edit))
+            if want in ("recomputed", "skip", "not_assessed"):
+                self.assertTrue(r["ok"] and r.get(want), (name, r))
+            else:
+                self.assertFalse(r["ok"], (name, r))
+                self.assertTrue(any(want in f for f in r["fails"]), (name, r["fails"]))
+
+    def test_tampered_dataset_bytes(self):
+        p = self.receipt("clean")
+        ds = self.root / "data" / "datasets" / f"{self.sha}.json"
+        ds.write_bytes(ds.read_bytes().replace(b"1", b"2", 1))
+        r = self.recompute(p)
+        self.assertFalse(r["ok"])
+        self.assertIn("dataset bytes TAMPERED or corrupted", r["fails"][0])
+
+    def test_exact_mismatch_message(self):
+        st = self.statement["predicate"]["summary"]["walkForward"]["results"][0]["inSample"]["finalEquityUsd"]
+        p = self.receipt("equity", lambda s: s["walkForward"]["results"][0]["inSample"].__setitem__("finalEquityUsd", 1.5))
+        self.assertEqual(self.recompute(p)["fails"][0],
+                         f"RECOMPUTE MISMATCH at $.results[0].inSample.finalEquityUsd (recomputed {vpy.js_number(st)} vs signed 1.5) \u2014 the signed numbers do NOT re-derive from the archived dataset (a valid signature cannot rescue false numbers)")
+
+    @unittest.skipUnless(NODE, "node is required for verify.mjs parity")
+    def test_identical_recompute_report_to_verify_mjs(self):
+        for name, (edit, _) in self.cases().items():
+            self.receipt(name, edit)
+        args = ["--pubkey", str(self.pin), "--datasets-root", str(self.root), "--dir", str(self.root / "receipts")]
+        jcode, jout = run_node(args)
+        pcode, pout = run_py(args)
+        j = [l for l in recompute_lines(jout) if "generation-8" not in l and "outside what" not in l]
+        p = [l for l in recompute_lines(pout) if "NOT ASSESSED" not in l]
+        self.assertEqual((pcode, jcode), (1, 1))
+        # verify.mjs recomputes version-8 and fractional-window receipts; the twin reports them NOT ASSESSED.
+        # Every other line (PASS/FAIL headers, SKIP, OK, RECOMPUTE FAIL) must be identical.
+        drop = {"version_8.json", "fractional_window.json"}
+        def keep(lines):
+            out, skip = [], False
+            for l in lines:
+                if l.startswith(("PASS", "FAIL")):
+                    skip = any(l.endswith(d) or (d in l) for d in drop)
+                    if skip:
+                        continue
+                if not skip and not l.startswith(("All ", "VERIFICATION", "Recompute")):
+                    out.append(l)
+            return out
+        self.assertEqual(keep(p), keep(j))
+
+
+class RecomputeArithmeticTests(unittest.TestCase):
+    def test_entry_boundary_z_equals_minus_z_entry(self):
+        # win = [1, 3]: mean 2, std 1 exactly, so z = (1 - 2) / 1 = -1 = -zEntry; momentum 1 / 0.5 - 1 > 0
+        p = {"momentumLookback": 3, "zWindow": 2, "volWindow": 2, "zEntry": 1.0, "positionFraction": 0.2}
+        self.assertEqual(vpy.z_score_m7([0.5, 1.0, 3.0, 1.0], 2), -1.0)
+        self.assertEqual(vpy.evaluate_action_m7([0.5, 1.0, 3.0, 1.0], p), "ENTER_LONG")
+
+    def test_minimum_notional_boundary_is_inclusive(self):
+        # 50 USD * 0.2 = exactly 10.00 USD, the smallest allowed entry
+        # warmup = max(windows) + 2 = 5, so the decision at bar 5 sees [..., 0.5, 1, 3, 1] and fills at bar 6
+        series = [{"close": c} for c in [1.0, 1.0, 0.5, 1.0, 3.0, 1.0, 1.0, 1.0]]
+        p = {"momentumLookback": 3, "zWindow": 2, "volWindow": 2, "zEntry": 1.0, "positionFraction": 0.2}
+        self.assertEqual(vpy.replay_series_m7(series, p, 30.0, 20.0, 50.0)["nTrades"], 1)
+        self.assertEqual(vpy.replay_series_m7(series, dict(p, positionFraction=0.19), 30.0, 20.0, 50.0)["nTrades"], 0)
+
+    def test_round_trip_at_entry_price_is_not_a_win(self):
+        self.assertEqual(vpy.count_round_trips_m7([("BUY", 2.0), ("SELL", 2.0), ("BUY", 1.0), ("SELL", 1.5), ("BUY", 3.0)]), (2, 1))
+
+    def test_mean_std_is_a_left_fold(self):
+        xs = [1e16, 1.0, -1e16, 1.0]
+        ms = vpy.mean_std_m7(xs)
+        acc = 0
+        for x in xs:
+            acc = acc + x
+        self.assertEqual(ms["mean"], acc / 4)
+        self.assertNotEqual(ms["mean"], math.fsum(xs) / 4)  # a compensated sum would differ from V8's reduce
+
+    def test_actions(self):
+        p = {"momentumLookback": 2, "zWindow": 3, "volWindow": 3, "zEntry": 1.0, "positionFraction": 0.2}
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 2.0], p), "ABSTAIN")
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.1, 1.2, 1.3, 1.25], p), "ENTER_LONG")
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.5, 1.6, 1.4, 1.45], p), "HOLD")  # momentum < 0, z < 0
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.2, 1.6, 1.4, 1.55], p), "EXIT_LONG")  # momentum < 0, z > 0
+        self.assertEqual(vpy.evaluate_action_m7([1.0, 1.0, 1.0, 1.0, 1.0], p), "ABSTAIN")  # zero std: z undefined
+
+
 class CliAndPinTests(unittest.TestCase):
     def test_usage_and_unsupported_flags_exit_2(self):
         self.assertEqual(run_py([])[0], 2)
-        self.assertEqual(run_py(["--book", "ledger"])[0], 2)
         self.assertEqual(run_py(["--witness", "."])[0], 2)
         self.assertEqual(run_py(["--dir"])[0], 2)
 
