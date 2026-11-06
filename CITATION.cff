@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using the metadata from this file.
+type: software
+title: szl-holdings/szl-quant — Doctrine-governed quant research engine
+version: 0.1.0
+date-released: '2026-11-05'
+license: Apache-2.0
+url: https://a-11-oy.com/signals
+repository-code: https://github.com/szl-holdings/szl-quant
+authors:
+- family-names: Lutar
+  given-names: Stephen P.
+  name-suffix: Jr.
+  orcid: https://orcid.org/0009-0001-0110-4173
+  affiliation: SZL Holdings
+keywords:
+- advisory-only
+- agentic-ai
+- doctrine-v11
+- dsse
+- governed-ai
+- quant-research
+- receipts
+- szl-holdings
+- javascript
+- quantitative-finance
+identifiers:
+- type: doi
+  value: 10.5281/zenodo.19944926
+  description: Concept DOI for the canonical Ouroboros Thesis (always resolves to the latest version)
