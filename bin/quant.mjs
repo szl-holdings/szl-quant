@@ -30,7 +30,12 @@ import { sign as rawEdSign, createHash, randomBytes } from 'node:crypto';
 import { buildTimestampRequest, parseTimestampResponse, verifyTimestampToken, tsaFileName, TSA_FILE_RE, buildTsaBody } from '../src/tsa.mjs';
 import { verifyObservation, buildGossipBody, gossipFileName, OBS_FILE_RE, GOSSIP_FILE_RE, GOSSIP_SOURCE } from '../src/gossip.mjs';
 
-// Upper bound for a fetched gossip observation before it is verified and archived (CodeQL js/http-to-file-access hardening).
+// Upper bound for one fetched gossip observation (real ones are ~6 KB). It is enforced while
+// the body streams (readBodyCapped), so an oversized body is never buffered whole, and an
+// over-cap observation is a loud rejection in the signed gossip receipt, not a fetch gap.
+// Archiving the observer's bytes is the point of the gossip pass, so CodeQL
+// js/http-to-file-access still reports that flow by design; the bytes are written only
+// after full offline re-verification against the pinned keys.
 const MAX_OBS_BYTES = 1 << 20;
 
 const TSA_AUTHORITIES = [
@@ -691,6 +696,27 @@ async function stampOneHead({ t, witnessDir, keys, backfilled }) {
   return false;
 }
 
+/** Read a fetch body but stop as soon as it crosses maxBytes: the stream is
+ *  cancelled there, so at most one chunk past the cap is ever held. Returns
+ *  { bytes } or { tooLarge: true }; transport errors propagate (a fetch gap). */
+async function readBodyCapped(res, maxBytes) {
+  if (!res.body) return { bytes: Buffer.alloc(0) };
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return { bytes: Buffer.concat(chunks, total) };
+    total += value.byteLength;
+    if (total > maxBytes) {
+      // the refusal is already decided; a failed cancel only means the stream is already torn down
+      await reader.cancel().catch(() => {});
+      return { tooLarge: true };
+    }
+    chunks.push(value);
+  }
+}
+
 /** Generation 5: cross-witness gossip — fetch, fully re-verify, and archive
  *  the second observer's signed observations, then account for them in an
  *  engine-signed gossip receipt. Fail-soft: an unreachable observer is an
@@ -725,22 +751,31 @@ async function gossipPass({ witnessDir, ledgerDir, keys }) {
   const rejected = [];
   let newArchived = 0;
   for (const item of remote.filter((x) => !existing.has(x.name)).sort((p, q) => p.name.localeCompare(q.name))) {
-    let bytes;
+    // Archive target: the regex-validated name only, resolved inside gossipDir. OBS_FILE_RE already
+    // admits no separators, so this never refuses a real observation (defense in depth).
+    const archiveTarget = resolve(gossipDir, basename(item.name));
+    if (!archiveTarget.startsWith(resolve(gossipDir) + sep)) {
+      rejected.push({ file: item.name, reason: 'archive path escapes the gossip dir — refused before fetching' });
+      console.log(`gossip REJECTED ${item.name}: archive path escapes the gossip dir`);
+      continue;
+    }
+    let body;
     try {
       const res = await fetch(item.download_url, { headers: { 'User-Agent': 'szl-quant-gossip' }, signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      bytes = Buffer.from(await res.arrayBuffer());
-      if (bytes.length > MAX_OBS_BYTES) throw new Error(`observation exceeds ${MAX_OBS_BYTES} bytes`);
+      body = await readBodyCapped(res, MAX_OBS_BYTES);
     } catch (e) {
       console.log(`gossip gap — could not fetch ${item.name} (${e.message}); counted in the open, not hidden`);
       continue;
     }
-    // Archive target is derived from the regex-validated basename only and must resolve inside gossipDir.
-    const archiveTarget = resolve(gossipDir, basename(item.name));
-    if (!archiveTarget.startsWith(resolve(gossipDir) + sep)) {
-      console.log(`gossip rejected ${item.name} — archive path escapes gossip dir`);
+    if (body.tooLarge) {
+      // reachable but BAD: a size refusal is a loud rejection in the signed receipt, never a fetch gap
+      const reason = `observation exceeds the ${MAX_OBS_BYTES}-byte cap — refused before parsing`;
+      rejected.push({ file: item.name, reason });
+      console.log(`gossip REJECTED ${item.name}: ${reason}`);
       continue;
     }
+    const bytes = body.bytes;
     let outcome;
     try {
       const env = JSON.parse(bytes.toString('utf8'));
