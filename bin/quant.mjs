@@ -33,9 +33,12 @@ import { verifyObservation, buildGossipBody, gossipFileName, OBS_FILE_RE, GOSSIP
 // Upper bound for one fetched gossip observation (real ones are ~6 KB). It is enforced while
 // the body streams (readBodyCapped), so an oversized body is never buffered whole, and an
 // over-cap observation is a loud rejection in the signed gossip receipt, not a fetch gap.
-// Archiving the observer's bytes is the point of the gossip pass, so CodeQL
-// js/http-to-file-access still reports that flow by design; the bytes are written only
-// after full offline re-verification against the pinned keys.
+// Archiving the observer's bytes is the point of the gossip pass, so the fetched-bytes-to-file
+// flow that CodeQL js/http-to-file-access describes stays by design: the query has no
+// sanitizer, and neither this cap nor the archive-path check is one. The bytes are written
+// only after full offline re-verification against the pinned keys. If that alert stops
+// firing after the switch to a streamed read, the cause is CodeQL's fetch model (its fetch
+// taint step covers json/text/blob/arrayBuffer), not a change in the flow.
 const MAX_OBS_BYTES = 1 << 20;
 
 const TSA_AUTHORITIES = [
