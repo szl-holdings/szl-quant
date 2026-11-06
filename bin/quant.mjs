@@ -11,7 +11,7 @@
  * Advisory research system. PAPER ONLY. Not financial advice.
  */
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RATE_DELAY_MS, sleep } from '../src/ingest/coingecko.mjs';
 import { fetchDailyHistoryResilient, HISTORY_IDS_BY_ADDRESS } from '../src/ingest/history.mjs';
@@ -29,6 +29,9 @@ import { buildRekordProposal, buildWitnessBody, witnessFileName, witnessTargets,
 import { sign as rawEdSign, createHash, randomBytes } from 'node:crypto';
 import { buildTimestampRequest, parseTimestampResponse, verifyTimestampToken, tsaFileName, TSA_FILE_RE, buildTsaBody } from '../src/tsa.mjs';
 import { verifyObservation, buildGossipBody, gossipFileName, OBS_FILE_RE, GOSSIP_FILE_RE, GOSSIP_SOURCE } from '../src/gossip.mjs';
+
+// Upper bound for a fetched gossip observation before it is verified and archived (CodeQL js/http-to-file-access hardening).
+const MAX_OBS_BYTES = 1 << 20;
 
 const TSA_AUTHORITIES = [
   { name: 'DigiCert', url: 'http://timestamp.digicert.com', anchor: 'digicert_anchor.pem' },
@@ -727,8 +730,15 @@ async function gossipPass({ witnessDir, ledgerDir, keys }) {
       const res = await fetch(item.download_url, { headers: { 'User-Agent': 'szl-quant-gossip' }, signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       bytes = Buffer.from(await res.arrayBuffer());
+      if (bytes.length > MAX_OBS_BYTES) throw new Error(`observation exceeds ${MAX_OBS_BYTES} bytes`);
     } catch (e) {
       console.log(`gossip gap — could not fetch ${item.name} (${e.message}); counted in the open, not hidden`);
+      continue;
+    }
+    // Archive target is derived from the regex-validated basename only and must resolve inside gossipDir.
+    const archiveTarget = resolve(gossipDir, basename(item.name));
+    if (!archiveTarget.startsWith(resolve(gossipDir) + sep)) {
+      console.log(`gossip rejected ${item.name} — archive path escapes gossip dir`);
       continue;
     }
     let outcome;
@@ -744,7 +754,7 @@ async function gossipPass({ witnessDir, ledgerDir, keys }) {
       outcome = { ok: false, reason: `unparseable observation: ${e.message}` };
     }
     if (outcome.ok) {
-      writeFileSync(join(gossipDir, item.name), bytes);
+      writeFileSync(archiveTarget, bytes);
       newArchived += 1;
       console.log(`gossip archived ${item.name} — verdict ${outcome.verdict} (fully re-verified offline before archiving)`);
     } else {
