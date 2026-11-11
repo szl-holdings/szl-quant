@@ -16,7 +16,14 @@ export function canonicalize(value) {
     return JSON.stringify(value);
   }
   if (typeof value === 'string') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+  if (Array.isArray(value)) {
+    const parts = [];
+    for (let i = 0; i < value.length; i++) {
+      if (!Object.hasOwn(value, i)) throw new Error('canonical JSON forbids sparse arrays');
+      parts.push(canonicalize(value[i]));
+    }
+    return `[${parts.join(',')}]`;
+  }
   if (typeof value === 'object') {
     const keys = Object.keys(value).sort();
     const parts = [];

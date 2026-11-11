@@ -16,6 +16,39 @@ test('canonical JSON sorts keys recursively and rejects non-finite', () => {
   assert.throws(() => canonicalize({ x: Infinity }));
 });
 
+for (const [name, sparse] of [
+  ['one missing element', () => Array(1)],
+  ['all missing elements', () => Array(2)],
+  ['leading hole', () => [, 1]],
+  ['interior hole', () => [1, , 3]],
+  ['trailing hole', () => [1, ,]],
+  ['nested hole', () => [{ nested: Array(1) }]],
+]) {
+  test(`sparse arrays are rejected before signing: ${name}`, () => {
+    const { privateKey, publicKey } = generateEngineKeypair();
+    assert.throws(() => canonicalize(sparse()), /sparse array/);
+    assert.throws(() => signEnvelope({ values: sparse() }, privateKey, publicKey), /sparse array/);
+    assert.throws(() => signReceipt({
+      predicateType: PREDICATE.signal, subjectName: 'test/sparse',
+      subjectBody: sparse(), predicate: { valid: true }, privateKey, publicKey,
+    }), /sparse array/);
+    assert.throws(() => signReceipt({
+      predicateType: PREDICATE.signal, subjectName: 'test/sparse',
+      subjectBody: {}, predicate: { values: sparse() }, privateKey, publicKey,
+    }), /sparse array/);
+  });
+}
+
+test('dense arrays retain canonical bytes and signed payload contents', () => {
+  const input = { values: [null, false, 0, '', [], { z: [2, 1], a: 'ok' }] };
+  const expected = '{"values":[null,false,0,"",[],{"a":"ok","z":[2,1]}]}';
+  assert.equal(canonicalize(input), expected);
+  const { privateKey, publicKey } = generateEngineKeypair();
+  const envelope = signEnvelope(input, privateKey, publicKey);
+  assert.equal(Buffer.from(envelope.payload, 'base64').toString('utf8'), expected);
+  assert.deepEqual(verifyEnvelope(envelope, publicKey).payload, input);
+});
+
 test('DSSE roundtrip verifies; tampered payload fails closed', () => {
   const { privateKey, publicKey } = generateEngineKeypair();
   const env = signEnvelope({ hello: 'world', n: 1 }, privateKey, publicKey);
