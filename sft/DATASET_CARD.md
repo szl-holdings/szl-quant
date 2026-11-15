@@ -124,7 +124,7 @@ Advisory research data. Paper-only lineage. Not financial advice.
 ## Citation
 
 Part of the SZL Holdings research program; concept DOI
-[10.5281/zenodo.19944926](https://doi.org/10.5281/zenodo.19944926). No
+[10.5281/zenodo.24239896](https://doi.org/10.5281/zenodo.24239896). No
 artifact-specific DOI is minted for this dataset.
 
 
